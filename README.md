@@ -48,6 +48,26 @@ docker compose up -d --build
 http://服务器IP:8000
 ```
 
+## 常用更新命令（可直接复制）
+
+更新到本次功能分支最新代码：
+
+```bash
+git fetch origin && git checkout 260421-feat-restock-transition-alerts && git pull --ff-only origin 260421-feat-restock-transition-alerts
+```
+
+推送当前分支到 GitHub：
+
+```bash
+git push
+```
+
+如果你在本地有新改动，需要先提交再推送：
+
+```bash
+git add . && git commit -m "chore: update" && git push origin 260421-feat-restock-transition-alerts
+```
+
 ## AFF 写法
 
 `AFF 前缀/模板` 支持三种方式：
