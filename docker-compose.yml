@@ -4,13 +4,13 @@ services:
     container_name: heyunidc-monitor
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "${WEB_PORT:-8000}:8000"
     environment:
       DATABASE_PATH: /data/monitor.db
-      SECRET_KEY: change-this-secret
-      WEBUI_PASSWORD: change-this-password
-      TELEGRAM_BOT_TOKEN: ""
-      TELEGRAM_CHAT_ID: ""
-      TELEGRAM_MESSAGE_THREAD_ID: ""
+      SECRET_KEY: ${SECRET_KEY:-change-this-secret}
+      WEBUI_PASSWORD: ${WEBUI_PASSWORD:-change-this-password}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      TELEGRAM_MESSAGE_THREAD_ID: ${TELEGRAM_MESSAGE_THREAD_ID:-}
     volumes:
       - ./data:/data

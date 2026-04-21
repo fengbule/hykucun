@@ -14,6 +14,19 @@ docker compose up -d --build
 http://服务器IP:8000
 ```
 
+如果服务器面板要求使用外部端口，例如 `1457`，在项目目录创建 `.env` 后再启动：
+
+```bash
+echo "WEB_PORT=1457" > .env
+docker compose up -d --build
+```
+
+然后访问：
+
+```text
+http://服务器IP:1457
+```
+
 ## 2. Telegram 环境变量
 
 这个仓库是公开仓库，服务器上 `git clone` 不需要 GitHub 账号密码。建议创建 `docker-compose.override.yml` 配置 Telegram 和 WebUI 密码：

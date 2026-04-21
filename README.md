@@ -36,6 +36,12 @@ services:
 
 如果只在内网临时使用，也可以把 `WEBUI_PASSWORD` 设为空字符串来关闭 WebUI 登录。
 
+如果服务器面板要求使用外部端口，例如 `1457`，在项目目录创建 `.env`：
+
+```bash
+echo "WEB_PORT=1457" > .env
+```
+
 启动：
 
 ```bash
@@ -48,24 +54,27 @@ docker compose up -d --build
 http://服务器IP:8000
 ```
 
+如果设置了 `WEB_PORT=1457`，访问：
+
+```text
+http://服务器IP:1457
+```
+
 ## 常用更新命令（可直接复制）
 
-更新到本次功能分支最新代码：
+在服务器项目目录执行：
 
 ```bash
-git fetch origin && git checkout 260421-feat-restock-transition-alerts && git pull --ff-only origin 260421-feat-restock-transition-alerts
+cd ~/hykucun/hykucun
+git checkout main
+git pull --ff-only origin main
+docker compose up -d --build
 ```
 
-推送当前分支到 GitHub：
+如果你实际目录不是 `~/hykucun/hykucun`，先用下面命令找项目目录：
 
 ```bash
-git push
-```
-
-如果你在本地有新改动，需要先提交再推送：
-
-```bash
-git add . && git commit -m "chore: update" && git push origin 260421-feat-restock-transition-alerts
+find ~ -maxdepth 3 -name docker-compose.yml -print
 ```
 
 ## AFF 写法
