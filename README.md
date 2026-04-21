@@ -6,6 +6,7 @@
 
 - 多监控网页配置
 - 每个监控项独立设置检测间隔、CSS 选择器、库存正则和标题过滤
+- 支持轻量 Requests 模式和 Playwright Browser 模式
 - 每个监控项独立配置 AFF 前缀/模板
 - Telegram 推送 HTML 商品卡片和购买按钮
 - SQLite 保存配置和库存快照
@@ -96,3 +97,16 @@ C:\Users\fengbule\codex\.venv\Scripts\python.exe app.py
 python restock_monitor.py --once
 python restock_monitor.py --once --aff-template "?aff=123"
 ```
+
+## Cloudflare 403
+
+如果某个网站显示类似：
+
+```text
+403 Client Error: Forbidden
+Cloudflare challenge returned 403
+```
+
+说明目标站拦截了普通后台请求。编辑这个监控项，把 `请求模式` 改为 `Browser 浏览器模式`，并把 `浏览器等待秒数` 调到 `10-20` 秒。Docker 镜像会内置 Playwright Chromium。
+
+如果浏览器模式仍然提示需要真人验证，说明目标站启用了交互式 Cloudflare 验证，这类页面无法用纯后台脚本稳定监控，只能换接口、RSS、官方 API，或让目标站放行你的服务器 IP。

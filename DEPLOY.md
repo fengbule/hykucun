@@ -44,6 +44,7 @@ docker compose up -d --build
 - Telegram Bot Token / Chat ID / Topic ID
 - 监控网页 URL
 - 检测间隔
+- 请求模式：Requests 轻量模式 / Browser 浏览器模式
 - 商品卡片、标题、库存、价格、按钮、购买链接 CSS 选择器
 - 库存正则
 - 有货词和缺货词
@@ -85,3 +86,9 @@ docker compose logs -f
 git pull
 docker compose up -d --build
 ```
+
+## 7. Cloudflare 403
+
+如果监控 VMISS 这类网站出现 `403 Client Error: Forbidden`，通常是 Cloudflare challenge。编辑监控项，把 `请求模式` 改为 `Browser 浏览器模式`，并把 `浏览器等待秒数` 调到 `10-20` 秒。
+
+如果浏览器模式仍然失败，说明目标站要求交互式真人验证，纯后台脚本无法稳定通过，需要换接口、官方 API，或让目标站放行服务器 IP。

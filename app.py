@@ -69,6 +69,8 @@ def init_db() -> None:
                 url TEXT NOT NULL,
                 enabled INTEGER NOT NULL DEFAULT 1,
                 interval_seconds INTEGER NOT NULL DEFAULT 60,
+                request_backend TEXT NOT NULL DEFAULT 'requests',
+                browser_wait_seconds INTEGER NOT NULL DEFAULT 8,
                 aff_template TEXT NOT NULL DEFAULT '',
                 product_selector TEXT NOT NULL DEFAULT '.product-card',
                 title_selector TEXT NOT NULL DEFAULT '.product-card-header h5, h5',
@@ -111,6 +113,9 @@ def init_db() -> None:
             """
         )
 
+        ensure_column(conn, "monitors", "request_backend", "TEXT NOT NULL DEFAULT 'requests'")
+        ensure_column(conn, "monitors", "browser_wait_seconds", "INTEGER NOT NULL DEFAULT 8")
+
         count = conn.execute("SELECT COUNT(*) FROM monitors").fetchone()[0]
         if count == 0 and os.getenv("SEED_DEFAULT_MONITOR", "1") != "0":
             insert_default_monitor(conn)
@@ -123,15 +128,18 @@ def insert_default_monitor(conn: sqlite3.Connection) -> None:
         """
         INSERT INTO monitors (
             name, url, enabled, interval_seconds, aff_template,
+            request_backend, browser_wait_seconds,
             product_selector, title_selector, stock_selector, price_selector,
             button_selector, link_selector, stock_regex, in_stock_words,
             out_of_stock_words, created_at, updated_at
-        ) VALUES (?, ?, 1, 60, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, 1, 60, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             values["name"],
             values["url"],
             values["aff_template"],
+            values["request_backend"],
+            values["browser_wait_seconds"],
             values["product_selector"],
             values["title_selector"],
             values["stock_selector"],
@@ -145,6 +153,12 @@ def insert_default_monitor(conn: sqlite3.Connection) -> None:
             timestamp,
         ),
     )
+
+
+def ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, definition: str) -> None:
+    columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table_name})")}
+    if column_name not in columns:
+        conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
 
 
 def get_settings(conn: sqlite3.Connection) -> dict[str, str]:
@@ -179,6 +193,8 @@ def monitor_config(row: sqlite3.Row) -> dict[str, Any]:
     for key in (
         "name",
         "url",
+        "request_backend",
+        "browser_wait_seconds",
         "aff_template",
         "product_selector",
         "title_selector",
@@ -517,6 +533,12 @@ def create_app() -> Flask:
             "url": request.form.get("url", "").strip(),
             "enabled": 1 if request.form.get("enabled") == "on" else 0,
             "interval_seconds": max(10, request.form.get("interval_seconds", type=int) or 60),
+            "request_backend": request.form.get("request_backend", "requests").strip()
+            if request.form.get("request_backend") in {"requests", "browser"}
+            else "requests",
+            "browser_wait_seconds": max(
+                0, request.form.get("browser_wait_seconds", type=int) or 0
+            ),
             "aff_template": request.form.get("aff_template", "").strip(),
             "product_selector": request.form.get("product_selector", "").strip()
             or DEFAULT_CONFIG["product_selector"],
@@ -548,6 +570,7 @@ def create_app() -> Flask:
                     """
                     UPDATE monitors SET
                         name = ?, url = ?, enabled = ?, interval_seconds = ?,
+                        request_backend = ?, browser_wait_seconds = ?,
                         aff_template = ?, product_selector = ?, title_selector = ?,
                         stock_selector = ?, price_selector = ?, button_selector = ?,
                         link_selector = ?, stock_regex = ?, in_stock_words = ?,
@@ -559,6 +582,8 @@ def create_app() -> Flask:
                         payload["url"],
                         payload["enabled"],
                         payload["interval_seconds"],
+                        payload["request_backend"],
+                        payload["browser_wait_seconds"],
                         payload["aff_template"],
                         payload["product_selector"],
                         payload["title_selector"],
@@ -579,18 +604,21 @@ def create_app() -> Flask:
                 conn.execute(
                     """
                     INSERT INTO monitors (
-                        name, url, enabled, interval_seconds, aff_template,
+                        name, url, enabled, interval_seconds,
+                        request_backend, browser_wait_seconds, aff_template,
                         product_selector, title_selector, stock_selector,
                         price_selector, button_selector, link_selector,
                         stock_regex, in_stock_words, out_of_stock_words,
                         title_filter, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         payload["name"],
                         payload["url"],
                         payload["enabled"],
                         payload["interval_seconds"],
+                        payload["request_backend"],
+                        payload["browser_wait_seconds"],
                         payload["aff_template"],
                         payload["product_selector"],
                         payload["title_selector"],

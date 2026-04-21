@@ -96,6 +96,21 @@
           </label>
         </div>
 
+        <div class="form-row two">
+          <label>
+            请求模式
+            <select name="request_backend">
+              {% set backend = form_monitor['request_backend'] if form_monitor['request_backend'] is defined else 'requests' %}
+              <option value="requests" {% if backend == 'requests' %}selected{% endif %}>Requests 轻量模式</option>
+              <option value="browser" {% if backend == 'browser' %}selected{% endif %}>Browser 浏览器模式</option>
+            </select>
+          </label>
+          <label>
+            浏览器等待秒数
+            <input type="number" min="0" name="browser_wait_seconds" value="{{ form_monitor['browser_wait_seconds'] if form_monitor['browser_wait_seconds'] is defined else 8 }}">
+          </label>
+        </div>
+
         <label>
           AFF 前缀/模板
           <input name="aff_template" value="{{ form_monitor['aff_template'] }}" placeholder="?aff=123 或 https://x/?u={encoded_url}">
@@ -163,6 +178,7 @@
         </div>
         <div class="meta">
           <span>间隔 {{ monitor.interval_seconds }} 秒</span>
+          <span>模式 {{ monitor.request_backend }}</span>
           <span>状态 {{ monitor.last_status }}</span>
           <span>上次 {{ monitor.last_checked_at or '未检查' }}</span>
         </div>

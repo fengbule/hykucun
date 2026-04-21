@@ -16,6 +16,8 @@ DEFAULT_URL = "https://www.heyunidc.cn/cart?fid=49&gid=97"
 DEFAULT_CONFIG: dict[str, Any] = {
     "name": "核云周年庆特惠",
     "url": DEFAULT_URL,
+    "request_backend": "requests",
+    "browser_wait_seconds": 8,
     "product_selector": ".product-card",
     "title_selector": ".product-card-header h5, h5",
     "stock_selector": ".stock-info",
@@ -23,8 +25,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "button_selector": ".buy-now-button",
     "link_selector": ".buy-now-button[href], a[href]",
     "stock_regex": r"库存\s*[:：]?\s*(\d+)",
-    "in_stock_words": "立即购买,加入购物车,购买,开通,下单",
-    "out_of_stock_words": "产品已售罄,已售罄,售罄,缺货,无货,暂无库存",
+    "in_stock_words": "立即购买,加入购物车,购买,开通,下单,Order Now,Buy Now,Available,Configure",
+    "out_of_stock_words": "产品已售罄,已售罄,售罄,缺货,无货,暂无库存,Out of Stock,Sold Out,Unavailable",
     "aff_template": "",
 }
 
@@ -187,6 +189,7 @@ def parse_product_card(card: Any, config: dict[str, Any]) -> Product:
 
 
 def parse_products(html_text: str, config: dict[str, Any]) -> list[Product]:
+    detect_blocked_page(html_text)
     soup = BeautifulSoup(html_text, "html.parser")
     selector = config.get("product_selector") or DEFAULT_CONFIG["product_selector"]
     try:
@@ -196,14 +199,83 @@ def parse_products(html_text: str, config: dict[str, Any]) -> list[Product]:
     return [parse_product_card(card, config) for card in cards]
 
 
-def fetch_products(config: dict[str, Any], timeout: int = 15) -> list[Product]:
+def detect_blocked_page(html_text: str) -> None:
+    lowered = html_text[:12000].lower()
+    if "cf_chl_opt" in lowered or "just a moment..." in lowered:
+        raise RuntimeError(
+            "Cloudflare challenge page detected. Switch this monitor to Browser mode. "
+            "If it still fails, the site requires an interactive human verification."
+        )
+
+
+def fetch_html_with_requests(config: dict[str, Any], timeout: int) -> str:
     response = requests.get(
         config["url"],
         headers=REQUEST_HEADERS,
         timeout=timeout,
     )
+    if response.headers.get("cf-mitigated", "").lower() == "challenge":
+        raise RuntimeError(
+            "Cloudflare challenge returned 403. Switch this monitor to Browser mode."
+        )
     response.raise_for_status()
-    return parse_products(response.text, config)
+    return response.text
+
+
+def fetch_html_with_browser(config: dict[str, Any], timeout: int) -> str:
+    try:
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise RuntimeError(
+            "Browser mode requires Playwright. Rebuild the Docker image after updating."
+        ) from exc
+
+    wait_seconds = max(0, int(config.get("browser_wait_seconds") or 0))
+    user_data_dir = config.get("browser_user_data_dir") or "/data/browser-profile"
+    if os_name_is_windows():
+        user_data_dir = "data/browser-profile"
+
+    with sync_playwright() as p:
+        context = p.chromium.launch_persistent_context(
+            user_data_dir=user_data_dir,
+            headless=True,
+            user_agent=REQUEST_HEADERS["User-Agent"],
+            locale="zh-CN",
+            args=[
+                "--disable-dev-shm-usage",
+                "--no-sandbox",
+                "--disable-blink-features=AutomationControlled",
+            ],
+        )
+        page = context.new_page()
+        try:
+            page.goto(config["url"], wait_until="domcontentloaded", timeout=timeout * 1000)
+            if wait_seconds:
+                page.wait_for_timeout(wait_seconds * 1000)
+            try:
+                page.wait_for_load_state("networkidle", timeout=5000)
+            except PlaywrightTimeoutError:
+                pass
+            html_text = page.content()
+        finally:
+            context.close()
+    return html_text
+
+
+def os_name_is_windows() -> bool:
+    import os
+
+    return os.name == "nt"
+
+
+def fetch_products(config: dict[str, Any], timeout: int = 15) -> list[Product]:
+    backend = (config.get("request_backend") or "requests").lower()
+    if backend == "browser":
+        html_text = fetch_html_with_browser(config, timeout)
+    else:
+        html_text = fetch_html_with_requests(config, timeout)
+    return parse_products(html_text, config)
 
 
 def find_restocked_products(
