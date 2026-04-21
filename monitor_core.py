@@ -490,13 +490,7 @@ def find_restocked_products(
             restocked.append(product)
             continue
 
-        previous_stock = previous.get("stock")
-        stock_increased = (
-            isinstance(previous_stock, int)
-            and product.stock is not None
-            and product.stock > previous_stock
-        )
-        if not previous.get("available") or stock_increased:
+        if not previous.get("available"):
             restocked.append(product)
     return restocked
 
