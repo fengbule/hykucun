@@ -17,29 +17,24 @@
 ```bash
 git clone https://github.com/fengbule/hykucun.git
 cd hykucun
-
-cp docker-compose.yml docker-compose.override.yml
 ```
 
-这个仓库是公开仓库，服务器上 `git clone` 不需要 GitHub 账号密码。编辑 `docker-compose.override.yml` 配置 Telegram 和 WebUI 密码：
+这个仓库是公开仓库，服务器上 `git clone` 不需要 GitHub 账号密码。创建 `.env` 配置 Telegram 和 WebUI 密码，不要把真实密码提交到仓库：
 
-```yaml
-services:
-  heyunidc-monitor:
-    environment:
-      SECRET_KEY: "换成随机字符串"
-      WEBUI_PASSWORD: "换成你的WebUI密码"
-      TELEGRAM_BOT_TOKEN: "你的BotToken"
-      TELEGRAM_CHAT_ID: "你的ChatID"
-      TELEGRAM_MESSAGE_THREAD_ID: ""
+```env
+SECRET_KEY=换成随机字符串
+WEBUI_PASSWORD=换成你的WebUI密码
+TELEGRAM_BOT_TOKEN=你的BotToken
+TELEGRAM_CHAT_ID=你的ChatID
+TELEGRAM_MESSAGE_THREAD_ID=
 ```
 
-如果只在内网临时使用，也可以把 `WEBUI_PASSWORD` 设为空字符串来关闭 WebUI 登录。
+项目没有默认 WebUI 密码；忘记密码时，直接修改 `.env` 里的 `WEBUI_PASSWORD` 后重启服务。只在可信内网临时使用时，可以把 `WEBUI_PASSWORD` 留空来关闭 WebUI 登录。
 
-如果服务器面板要求使用外部端口，例如 `1457`，在项目目录创建 `.env`：
+如果服务器面板要求使用外部端口，例如 `1457`，把端口写到同一个 `.env`：
 
 ```bash
-echo "WEB_PORT=1457" > .env
+echo "WEB_PORT=1457" >> .env
 ```
 
 启动：
