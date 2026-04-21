@@ -564,12 +564,17 @@ def validate_runtime_secrets() -> None:
     webui_password = os.getenv("WEBUI_PASSWORD", "")
     if secret_key in INSECURE_SECRET_KEYS:
         raise RuntimeError(
-            "SECRET_KEY is using a public placeholder. Set a unique random value."
+            "SECRET_KEY is using a public placeholder. Set a unique random value "
+            "in .env. If .env already looks correct, remove stale SECRET_KEY "
+            "entries from docker-compose.override.yml and verify with "
+            "`docker compose config`."
         )
     if webui_password in INSECURE_WEBUI_PASSWORDS:
         raise RuntimeError(
             "WEBUI_PASSWORD is using a public placeholder. Set a private password "
-            "or leave it empty only on a trusted private network."
+            "in .env, or leave it empty only on a trusted private network. If .env "
+            "already looks correct, remove stale WEBUI_PASSWORD entries from "
+            "docker-compose.override.yml and verify with `docker compose config`."
         )
 
 
