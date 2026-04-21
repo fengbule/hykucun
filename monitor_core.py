@@ -164,7 +164,14 @@ def apply_aff_template(url: str, aff_template: str) -> str:
 
 
 def product_key(title: str, price: str, purchase_url: str, fallback_text: str) -> str:
-    raw = "|".join([title, price, purchase_url, fallback_text[:120]])
+    title_key = clean_text(title).casefold()
+    if title_key in {"未知商品", "unknown product"}:
+        title_key = ""
+    link_key = clean_text(purchase_url)
+    if title_key or link_key:
+        raw = "|".join(["product-v2", title_key, link_key])
+    else:
+        raw = "|".join(["product-v2", clean_text(price).casefold(), clean_text(fallback_text)[:120]])
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
 
@@ -216,7 +223,6 @@ def parse_product_card(card: Any, config: dict[str, Any]) -> Product:
 
 
 def parse_products(html_text: str, config: dict[str, Any]) -> list[Product]:
-    detect_blocked_page(html_text)
     soup = BeautifulSoup(html_text, "html.parser")
     selector = config.get("product_selector") or DEFAULT_CONFIG["product_selector"]
     try:
@@ -226,7 +232,13 @@ def parse_products(html_text: str, config: dict[str, Any]) -> list[Product]:
     products = [parse_product_card(card, config) for card in cards]
     if products:
         return products
-    return parse_whmcs_products(soup, config)
+
+    products = parse_whmcs_products(soup, config)
+    if products:
+        return products
+
+    detect_blocked_page(html_text)
+    return []
 
 
 def contains_any(text: str, words: list[str]) -> bool:
@@ -382,9 +394,11 @@ def detect_blocked_page(html_text: str) -> None:
         "cf_chl_opt",
         "just a moment...",
         "checking your browser",
+        "verify you are human",
+        "complete the security check",
+        "attention required! | cloudflare",
         "security check",
         "ddos-guard",
-        "captcha",
     )
     blocked_markers_zh = (
         "正在进行安全验证",
@@ -485,14 +499,33 @@ def find_restocked_products(
         if not product.available:
             continue
 
-        previous = previous_products.get(product.key)
+        previous = find_previous_product_state(product, previous_products)
         if not previous:
-            restocked.append(product)
             continue
 
         if not previous.get("available"):
             restocked.append(product)
     return restocked
+
+
+def find_previous_product_state(
+    product: Product, previous_products: dict[str, dict[str, Any]]
+) -> dict[str, Any] | None:
+    previous = previous_products.get(product.key)
+    if previous:
+        return previous
+
+    product_title = clean_text(product.title).casefold()
+    product_url = clean_text(product.purchase_url)
+    for item in previous_products.values():
+        previous_title = clean_text(str(item.get("title") or "")).casefold()
+        previous_url = clean_text(str(item.get("purchase_url") or ""))
+        if product_url and previous_url and product_url == previous_url:
+            return item
+        if product_title and previous_title == product_title:
+            if not product_url or not previous_url or product_url == previous_url:
+                return item
+    return None
 
 
 def stock_label(product: Product) -> str:

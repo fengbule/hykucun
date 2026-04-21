@@ -20,7 +20,13 @@ from flask import (
     url_for,
 )
 
-from monitor_core import DEFAULT_CONFIG, Product, fetch_products, find_restocked_products
+from monitor_core import (
+    DEFAULT_CONFIG,
+    Product,
+    fetch_products,
+    find_previous_product_state,
+    find_restocked_products,
+)
 from monitor_core import telegram_product_card
 
 
@@ -96,8 +102,8 @@ def init_db() -> None:
                 button_selector TEXT NOT NULL DEFAULT '.buy-now-button',
                 link_selector TEXT NOT NULL DEFAULT '.buy-now-button[href], a[href]',
                 stock_regex TEXT NOT NULL DEFAULT '库存\\s*[:：]?\\s*(\\d+)',
-                in_stock_words TEXT NOT NULL DEFAULT '立即购买,加入购物车,购买,开通,下单',
-                out_of_stock_words TEXT NOT NULL DEFAULT '产品已售罄,已售罄,售罄,缺货,无货,暂无库存',
+                in_stock_words TEXT NOT NULL DEFAULT '立即购买,加入购物车,购买,开通,下单,Order Now,Buy Now,Available,Configure',
+                out_of_stock_words TEXT NOT NULL DEFAULT '产品已售罄,已售罄,售罄,缺货,无货,暂无库存,Out of Stock,Sold Out,Unavailable',
                 title_filter TEXT NOT NULL DEFAULT '',
                 last_checked_at TEXT,
                 last_status TEXT NOT NULL DEFAULT 'pending',
@@ -294,7 +300,7 @@ def classify_monitor_failure(
 
 def previous_product_state(conn: sqlite3.Connection, monitor_id: int) -> dict[str, dict[str, Any]]:
     rows = conn.execute(
-        "SELECT * FROM products WHERE monitor_id = ?",
+        "SELECT * FROM products WHERE monitor_id = ? ORDER BY last_seen_at DESC",
         (monitor_id,),
     ).fetchall()
     return {
@@ -302,6 +308,7 @@ def previous_product_state(conn: sqlite3.Connection, monitor_id: int) -> dict[st
             "available": bool(row["available"]),
             "stock": row["stock"],
             "title": row["title"],
+            "purchase_url": row["purchase_url"],
             "unavailable_since": row["unavailable_since"],
         }
         for row in rows
@@ -311,19 +318,44 @@ def previous_product_state(conn: sqlite3.Connection, monitor_id: int) -> dict[st
 def upsert_products(conn: sqlite3.Connection, monitor_id: int, products: list[Product]) -> None:
     timestamp = now_str()
     existing_rows = conn.execute(
-        "SELECT product_key, available, unavailable_since FROM products WHERE monitor_id = ?",
+        """
+        SELECT product_key, available, unavailable_since, title, stock, purchase_url
+        FROM products
+        WHERE monitor_id = ?
+        ORDER BY last_seen_at DESC
+        """,
         (monitor_id,),
     ).fetchall()
-    existing = {row["product_key"]: row for row in existing_rows}
+    existing = {
+        row["product_key"]: {
+            "available": bool(row["available"]),
+            "stock": row["stock"],
+            "title": row["title"],
+            "purchase_url": row["purchase_url"],
+            "unavailable_since": row["unavailable_since"],
+        }
+        for row in existing_rows
+    }
 
     for product in products:
-        previous = existing.get(product.key)
+        previous = find_previous_product_state(product, existing)
         if product.available:
             unavailable_since = None
-        elif previous and not bool(previous["available"]) and previous["unavailable_since"]:
+        elif previous and not bool(previous["available"]) and previous.get("unavailable_since"):
             unavailable_since = previous["unavailable_since"]
         else:
             unavailable_since = timestamp
+
+        if product.purchase_url:
+            conn.execute(
+                """
+                DELETE FROM products
+                WHERE monitor_id = ?
+                  AND product_key <> ?
+                  AND purchase_url = ?
+                """,
+                (monitor_id, product.key, product.purchase_url),
+            )
 
         conn.execute(
             """
@@ -494,13 +526,13 @@ def check_monitor_once(monitor_id: int) -> tuple[bool, str]:
     failed = 0
     now = datetime.now()
     for product in restocked:
-        previous_item = previous.get(product.key)
+        previous_item = find_previous_product_state(product, previous)
         stock_transition: str | None = None
         if previous_item:
             previous_stock = previous_item.get("stock")
             previous_stock_text = "未知" if previous_stock is None else str(previous_stock)
             current_stock_text = "未知" if product.stock is None else str(product.stock)
-            stock_transition = f"{previous_stock_text} -> {current_stock_text} Available"
+            stock_transition = f"{previous_stock_text} -> {current_stock_text} 可用"
             unavailable_since = parse_dt(previous_item.get("unavailable_since"))
             if unavailable_since:
                 elapsed = int((now - unavailable_since).total_seconds())

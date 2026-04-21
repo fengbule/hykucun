@@ -9,6 +9,7 @@
 - Docker 镜像内置 Playwright Chromium，可在 WebUI 直接切换 Requests / Browser
 - 每个监控项独立配置 AFF 前缀/模板
 - Telegram 推送 HTML 商品卡片和购买按钮
+- 只在商品从缺货恢复为有货时推送一次，库存仍然可购买时不会反复提醒
 - SQLite 保存配置和库存快照
 - Docker / docker compose 部署
 
@@ -172,3 +173,5 @@ cf_clearance=xxxx; __cf_bm=yyyy
 然后再执行立即检查。若 Cookie 失效会再次出现安全验证提示，需要重新获取。
 
 如果浏览器模式显示 `ok` 但没有商品，通常是 CSS 选择器不适配。VMISS/WHMCS 页面常见结构不是 `.product-card`，而是 `h3 产品名 + Order Now + 0 Available`。程序会自动用 WHMCS 兜底解析；升级后仍无商品时，先清空标题过滤，再点一次立即检查。
+
+VMISS 页面里可能自带 `recaptchaSiteKey` 变量，这不一定代表当前请求被安全验证拦截。程序会先尝试解析套餐，只有完全解析不到商品并命中 Cloudflare/安全验证特征时，才提示 Cookie 或 Browser 模式。
