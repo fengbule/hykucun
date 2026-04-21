@@ -102,3 +102,5 @@ docker compose -f docker-compose.yml -f docker-compose.browser.yml up -d --build
 浏览器模式占用明显更高，建议监控间隔设置为 `300-600` 秒，不要 10 秒或 20 秒跑一次。
 
 如果浏览器模式仍然失败，说明目标站要求交互式真人验证，纯后台脚本无法稳定通过，需要换接口、官方 API，或让目标站放行服务器 IP。
+
+如果浏览器模式能加载页面但显示 `no_products` 或没有商品快照，说明页面结构和 CSS 选择器不匹配。VMISS/WHMCS 页面会自动尝试按 `h3 产品名 + Order Now + 0 Available` 兜底解析；升级后仍无商品时，先清空标题过滤，再点一次立即检查。

@@ -85,11 +85,26 @@ def selected_text(root: Any, selector: str | None) -> str:
 def extract_stock(stock_text: str, stock_regex: str) -> int | None:
     if not stock_text:
         return None
-    try:
-        match = re.search(stock_regex, stock_text)
-    except re.error:
-        match = re.search(DEFAULT_CONFIG["stock_regex"], stock_text)
-    return int(match.group(1)) if match else None
+    patterns = [
+        stock_regex,
+        DEFAULT_CONFIG["stock_regex"],
+        r"(\d+)\s*Available",
+        r"Available\s*[:：]?\s*(\d+)",
+        r"库存\s*[:：]?\s*(\d+)",
+    ]
+    for pattern in patterns:
+        if not pattern:
+            continue
+        try:
+            match = re.search(pattern, stock_text, re.IGNORECASE)
+        except re.error:
+            continue
+        if not match:
+            continue
+        for group in match.groups():
+            if group and group.isdigit():
+                return int(group)
+    return None
 
 
 def node_classes(node: Any | None) -> set[str]:
@@ -151,10 +166,10 @@ def parse_product_card(card: Any, config: dict[str, Any]) -> Product:
 
     out_words = split_words(config.get("out_of_stock_words") or DEFAULT_CONFIG["out_of_stock_words"])
     in_words = split_words(config.get("in_stock_words") or DEFAULT_CONFIG["in_stock_words"])
-    button_says_sold_out = "SellOut" in node_classes(button_node) or any(
-        word in button_text for word in out_words
+    button_says_sold_out = "SellOut" in node_classes(button_node) or contains_any(
+        button_text, out_words
     )
-    button_says_buyable = any(word in button_text for word in in_words)
+    button_says_buyable = contains_any(button_text, in_words)
 
     if stock is not None:
         available = stock > 0 and not button_says_sold_out
@@ -196,7 +211,136 @@ def parse_products(html_text: str, config: dict[str, Any]) -> list[Product]:
         cards = soup.select(selector)
     except Exception:
         cards = []
-    return [parse_product_card(card, config) for card in cards]
+    products = [parse_product_card(card, config) for card in cards]
+    if products:
+        return products
+    return parse_whmcs_products(soup, config)
+
+
+def contains_any(text: str, words: list[str]) -> bool:
+    lowered = text.lower()
+    return any(word.lower() in lowered for word in words if word)
+
+
+def parse_whmcs_products(soup: BeautifulSoup, config: dict[str, Any]) -> list[Product]:
+    products: list[Product] = []
+    headings = soup.find_all(["h3", "h4"])
+    for heading in headings:
+        title = clean_text(heading.get_text(" ", strip=True))
+        if not looks_like_product_heading(title):
+            continue
+
+        container = whmcs_product_container(heading)
+        card_text = clean_text(container.get_text(" ", strip=True))
+        if not contains_any(card_text, split_words(config.get("in_stock_words") or "")):
+            continue
+
+        products.append(parse_whmcs_product_section(title, container, config))
+    return dedupe_products(products)
+
+
+def looks_like_product_heading(title: str) -> bool:
+    if not title:
+        return False
+    lowered = title.lower()
+    blocked = {
+        "categories",
+        "actions",
+        "added to cart",
+        "based on your order, we recommend:",
+    }
+    if lowered in blocked:
+        return False
+    return "." in title or any(token in lowered for token in ("vps", "server", "tri", "bgp"))
+
+
+def whmcs_product_container(heading: Any) -> Any:
+    for parent in heading.parents:
+        if parent.name not in {"div", "li", "article", "section"}:
+            continue
+        if len(parent.find_all(["h3", "h4"])) > 1:
+            continue
+        if parent.find("a"):
+            return parent
+    return whmcs_section_fragment(heading)
+
+
+def whmcs_section_fragment(heading: Any) -> BeautifulSoup:
+    parts = [str(heading)]
+    for sibling in heading.next_siblings:
+        if getattr(sibling, "name", None) in {"h2", "h3", "h4"}:
+            break
+        parts.append(str(sibling))
+    return BeautifulSoup("".join(parts), "html.parser")
+
+
+def parse_whmcs_product_section(title: str, container: Any, config: dict[str, Any]) -> Product:
+    card_text = clean_text(container.get_text(" ", strip=True))
+    stock = extract_stock(card_text, config.get("stock_regex") or DEFAULT_CONFIG["stock_regex"])
+    price = extract_price_from_text(card_text)
+
+    in_words = split_words(config.get("in_stock_words") or DEFAULT_CONFIG["in_stock_words"])
+    out_words = split_words(config.get("out_of_stock_words") or DEFAULT_CONFIG["out_of_stock_words"])
+    button_node = find_link_by_words(container, in_words) or container.find("a", href=True)
+    button_text = clean_text(button_node.get_text(" ", strip=True)) if button_node else ""
+    button_says_sold_out = contains_any(card_text, out_words) or contains_any(button_text, out_words)
+    button_says_buyable = contains_any(button_text, in_words)
+
+    if stock is not None:
+        available = stock > 0 and not button_says_sold_out
+    elif button_node:
+        available = button_says_buyable and not button_says_sold_out
+    else:
+        available = False
+
+    if available:
+        status = "in_stock"
+    elif stock == 0 or button_says_sold_out:
+        status = "out_of_stock"
+    else:
+        status = "unknown"
+
+    raw_link = extract_link(button_node)
+    absolute_link = urljoin(config["url"], raw_link) if raw_link else config["url"]
+    purchase_url = apply_aff_template(absolute_link, config.get("aff_template", ""))
+
+    return Product(
+        key=product_key(title, price, absolute_link, card_text),
+        title=title,
+        status=status,
+        available=available,
+        stock=stock,
+        price=price,
+        button=button_text,
+        purchase_url=purchase_url,
+    )
+
+
+def find_link_by_words(container: Any, words: list[str]) -> Any | None:
+    for link in container.find_all("a", href=True):
+        if contains_any(clean_text(link.get_text(" ", strip=True)), words):
+            return link
+    return None
+
+
+def extract_price_from_text(text: str) -> str:
+    match = re.search(
+        r"([$€£¥]\s*\d[\d,.]*(?:\s*[A-Z]{3})?(?:\s*(?:Monthly|Annually|Quarterly|Yearly|年|月|三年))?)",
+        text,
+        re.IGNORECASE,
+    )
+    return clean_text(match.group(1)) if match else ""
+
+
+def dedupe_products(products: list[Product]) -> list[Product]:
+    seen: set[str] = set()
+    deduped: list[Product] = []
+    for product in products:
+        if product.key in seen:
+            continue
+        seen.add(product.key)
+        deduped.append(product)
+    return deduped
 
 
 def detect_blocked_page(html_text: str) -> None:

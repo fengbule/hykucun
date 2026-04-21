@@ -355,8 +355,15 @@ def check_monitor_once(monitor_id: int) -> tuple[bool, str]:
         products = [product for product in products if title_matches(product, title_filter)]
         restocked = find_restocked_products(products, previous)
         available_count = sum(1 for product in products if product.available)
-        status = "ok"
-        error = ""
+        if products:
+            status = "ok"
+            error = ""
+        else:
+            status = "no_products"
+            error = (
+                "Page loaded, but no products matched. Check CSS selectors, title filter, "
+                "or whether the site uses a different product layout."
+            )
     except Exception as exc:
         products = []
         restocked = []
@@ -379,6 +386,10 @@ def check_monitor_once(monitor_id: int) -> tuple[bool, str]:
 
         if status == "error":
             log_event(conn, monitor_id, "error", error)
+            return False, error
+
+        if status == "no_products":
+            log_event(conn, monitor_id, "warning", error)
             return False, error
 
         message = f"检测 {len(products)} 个商品，可购买 {available_count} 个，新补货 {len(restocked)} 个"

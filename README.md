@@ -118,3 +118,5 @@ docker compose -f docker-compose.yml -f docker-compose.browser.yml up -d --build
 浏览器模式占用明显更高，建议把这类监控间隔调到 `300-600` 秒，不要 10 秒或 20 秒跑一次。
 
 如果浏览器模式仍然提示需要真人验证，说明目标站启用了交互式 Cloudflare 验证，这类页面无法用纯后台脚本稳定监控，只能换接口、RSS、官方 API，或让目标站放行你的服务器 IP。
+
+如果浏览器模式显示 `ok` 但没有商品，通常是 CSS 选择器不适配。VMISS/WHMCS 页面常见结构不是 `.product-card`，而是 `h3 产品名 + Order Now + 0 Available`。程序会自动用 WHMCS 兜底解析；升级后仍无商品时，先清空标题过滤，再点一次立即检查。
