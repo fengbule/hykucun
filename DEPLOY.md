@@ -3,8 +3,8 @@
 ## 1. 启动服务
 
 ```bash
-git clone https://github.com/fengbule/heyunidc.git
-cd heyunidc
+git clone https://github.com/fengbule/hykucun.git
+cd hykucun
 docker compose up -d --build
 ```
 
@@ -14,9 +14,9 @@ docker compose up -d --build
 http://服务器IP:8000
 ```
 
-## 2. 必改环境变量
+## 2. Telegram 环境变量
 
-建议创建 `docker-compose.override.yml`，覆盖默认密钥：
+这个仓库是公开仓库，服务器上 `git clone` 不需要 GitHub 账号密码。建议创建 `docker-compose.override.yml` 配置 Telegram 和 WebUI 密码：
 
 ```yaml
 services:
@@ -28,6 +28,8 @@ services:
       TELEGRAM_CHAT_ID: "你的ChatID"
       TELEGRAM_MESSAGE_THREAD_ID: ""
 ```
+
+如果只在内网临时使用，也可以把 `WEBUI_PASSWORD` 设为空字符串来关闭 WebUI 登录。
 
 然后重启：
 
