@@ -28,6 +28,8 @@ DB_LOCK = threading.Lock()
 SCHEDULER_STARTED = False
 INSECURE_SECRET_KEYS = {"change-this-secret"}
 INSECURE_WEBUI_PASSWORDS = {"change-this-password"}
+MIN_INTERVAL_SECONDS = 1
+DEFAULT_SCHEDULER_TICK_SECONDS = 1.0
 
 
 def now_str() -> str:
@@ -529,20 +531,21 @@ def due_monitors() -> list[int]:
     now = datetime.now()
     for row in rows:
         last_checked = parse_dt(row["last_checked_at"])
-        interval = max(10, int(row["interval_seconds"] or 60))
+        interval = max(MIN_INTERVAL_SECONDS, int(row["interval_seconds"] or 60))
         if last_checked is None or last_checked + timedelta(seconds=interval) <= now:
             due.append(int(row["id"]))
     return due
 
 
 def scheduler_loop() -> None:
+    tick_seconds = max(0.2, float(os.getenv("SCHEDULER_TICK_SECONDS", str(DEFAULT_SCHEDULER_TICK_SECONDS))))
     while True:
         try:
             for monitor_id in due_monitors():
                 check_monitor_once(monitor_id)
         except Exception:
             pass
-        time.sleep(int(os.getenv("SCHEDULER_TICK_SECONDS", "5")))
+        time.sleep(tick_seconds)
 
 
 def require_login(app: Flask) -> None:
@@ -674,7 +677,7 @@ def create_app() -> Flask:
             "name": request.form.get("name", "").strip() or "未命名监控",
             "url": request.form.get("url", "").strip(),
             "enabled": 1 if request.form.get("enabled") == "on" else 0,
-            "interval_seconds": max(10, request.form.get("interval_seconds", type=int) or 60),
+            "interval_seconds": max(MIN_INTERVAL_SECONDS, request.form.get("interval_seconds", type=int) or 60),
             "request_backend": request.form.get("request_backend", "requests").strip()
             if request.form.get("request_backend") in {"requests", "browser"}
             else "requests",
