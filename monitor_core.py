@@ -5,7 +5,7 @@ import html
 import re
 from dataclasses import asdict, dataclass
 from typing import Any
-from urllib.parse import quote, urljoin
+from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit, urlunsplit
 
 import requests
 from bs4 import BeautifulSoup
@@ -146,8 +146,19 @@ def apply_aff_template(url: str, aff_template: str) -> str:
         )
 
     if template.startswith("?") or template.startswith("&"):
+        extra_query = template.lstrip("?&")
+        if not extra_query:
+            return url
+        split = urlsplit(url)
+        existing_pairs = parse_qsl(split.query, keep_blank_values=True)
+        extra_pairs = parse_qsl(extra_query, keep_blank_values=True)
+        if extra_pairs and existing_pairs:
+            merged_pairs = existing_pairs[:1] + extra_pairs + existing_pairs[1:]
+            new_query = urlencode(merged_pairs, doseq=True)
+            return urlunsplit((split.scheme, split.netloc, split.path, new_query, split.fragment))
+
         joiner = "&" if "?" in url else "?"
-        return f"{url}{joiner}{template.lstrip('?&')}"
+        return f"{url}{joiner}{extra_query}"
 
     return f"{template}{url}"
 
@@ -494,12 +505,15 @@ def stock_label(product: Product) -> str:
     return "未知" if product.stock is None else str(product.stock)
 
 
-def telegram_product_card(monitor_name: str, product: Product) -> str:
+def telegram_product_card(
+    monitor_name: str, product: Product, stock_transition: str | None = None
+) -> str:
+    stock_line = stock_transition or stock_label(product)
     lines = [
         f"<b>{html.escape(monitor_name)}</b>",
         "",
         f"<b>{html.escape(product.title)}</b>",
-        f"库存：{html.escape(stock_label(product))}",
+        f"库存：{html.escape(stock_line)}",
         f"价格：{html.escape(product.price or '未知')}",
         f"状态：{html.escape(product.button or product.status)}",
         "",

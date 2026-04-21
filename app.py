@@ -41,6 +41,17 @@ def parse_dt(value: str | None) -> datetime | None:
         return None
 
 
+def format_duration(seconds: int) -> str:
+    seconds = max(0, seconds)
+    hours, remainder = divmod(seconds, 3600)
+    minutes, sec = divmod(remainder, 60)
+    if hours:
+        return f"{hours}小时{minutes}分{sec}秒"
+    if minutes:
+        return f"{minutes}分{sec}秒"
+    return f"{sec}秒"
+
+
 def database_path() -> Path:
     path = Path(os.getenv("DATABASE_PATH", "/data/monitor.db"))
     if os.name == "nt" and str(path).startswith("\\data"):
@@ -100,6 +111,7 @@ def init_db() -> None:
                 stock INTEGER,
                 price TEXT NOT NULL DEFAULT '',
                 purchase_url TEXT NOT NULL DEFAULT '',
+                unavailable_since TEXT,
                 last_seen_at TEXT NOT NULL,
                 PRIMARY KEY (monitor_id, product_key),
                 FOREIGN KEY (monitor_id) REFERENCES monitors(id) ON DELETE CASCADE
@@ -118,6 +130,7 @@ def init_db() -> None:
         ensure_column(conn, "monitors", "request_backend", "TEXT NOT NULL DEFAULT 'requests'")
         ensure_column(conn, "monitors", "browser_wait_seconds", "INTEGER NOT NULL DEFAULT 8")
         ensure_column(conn, "monitors", "cookie_header", "TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "products", "unavailable_since", "TEXT")
 
         count = conn.execute("SELECT COUNT(*) FROM monitors").fetchone()[0]
         if count == 0 and os.getenv("SEED_DEFAULT_MONITOR", "1") != "0":
@@ -284,6 +297,7 @@ def previous_product_state(conn: sqlite3.Connection, monitor_id: int) -> dict[st
             "available": bool(row["available"]),
             "stock": row["stock"],
             "title": row["title"],
+            "unavailable_since": row["unavailable_since"],
         }
         for row in rows
     }
@@ -291,13 +305,27 @@ def previous_product_state(conn: sqlite3.Connection, monitor_id: int) -> dict[st
 
 def upsert_products(conn: sqlite3.Connection, monitor_id: int, products: list[Product]) -> None:
     timestamp = now_str()
+    existing_rows = conn.execute(
+        "SELECT product_key, available, unavailable_since FROM products WHERE monitor_id = ?",
+        (monitor_id,),
+    ).fetchall()
+    existing = {row["product_key"]: row for row in existing_rows}
+
     for product in products:
+        previous = existing.get(product.key)
+        if product.available:
+            unavailable_since = None
+        elif previous and not bool(previous["available"]) and previous["unavailable_since"]:
+            unavailable_since = previous["unavailable_since"]
+        else:
+            unavailable_since = timestamp
+
         conn.execute(
             """
             INSERT INTO products (
                 monitor_id, product_key, title, status, available, stock,
-                price, purchase_url, last_seen_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                price, purchase_url, unavailable_since, last_seen_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(monitor_id, product_key) DO UPDATE SET
                 title = excluded.title,
                 status = excluded.status,
@@ -305,6 +333,7 @@ def upsert_products(conn: sqlite3.Connection, monitor_id: int, products: list[Pr
                 stock = excluded.stock,
                 price = excluded.price,
                 purchase_url = excluded.purchase_url,
+                unavailable_since = excluded.unavailable_since,
                 last_seen_at = excluded.last_seen_at
             """,
             (
@@ -316,6 +345,7 @@ def upsert_products(conn: sqlite3.Connection, monitor_id: int, products: list[Pr
                 product.stock,
                 product.price,
                 product.purchase_url,
+                unavailable_since,
                 timestamp,
             ),
         )
@@ -334,6 +364,7 @@ def send_telegram_product(
     settings: dict[str, str],
     monitor_name: str,
     product: Product,
+    stock_transition: str | None = None,
 ) -> tuple[bool, str]:
     bot_token = settings.get("telegram_bot_token", "").strip()
     chat_id = settings.get("telegram_chat_id", "").strip()
@@ -342,7 +373,7 @@ def send_telegram_product(
 
     payload: dict[str, Any] = {
         "chat_id": chat_id,
-        "text": telegram_product_card(monitor_name, product),
+        "text": telegram_product_card(monitor_name, product, stock_transition),
         "parse_mode": "HTML",
         "disable_web_page_preview": False,
     }
@@ -456,8 +487,26 @@ def check_monitor_once(monitor_id: int) -> tuple[bool, str]:
 
     sent = 0
     failed = 0
+    now = datetime.now()
     for product in restocked:
-        ok, telegram_message = send_telegram_product(settings, config["name"], product)
+        previous_item = previous.get(product.key)
+        stock_transition: str | None = None
+        if previous_item:
+            previous_stock = previous_item.get("stock")
+            previous_stock_text = "未知" if previous_stock is None else str(previous_stock)
+            current_stock_text = "未知" if product.stock is None else str(product.stock)
+            stock_transition = f"{previous_stock_text} -> {current_stock_text} Available"
+            unavailable_since = parse_dt(previous_item.get("unavailable_since"))
+            if unavailable_since:
+                elapsed = int((now - unavailable_since).total_seconds())
+                stock_transition = f"{stock_transition}（{format_duration(elapsed)}）"
+
+        ok, telegram_message = send_telegram_product(
+            settings,
+            config["name"],
+            product,
+            stock_transition,
+        )
         sent += 1 if ok else 0
         failed += 0 if ok else 1
         with DB_LOCK, connect_db() as conn:
