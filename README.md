@@ -66,7 +66,6 @@ http://服务器IP:1457
 
 ```bash
 cd ~/hykucun/hykucun
-git checkout main
 git pull --ff-only origin main
 docker compose up -d --build
 ```

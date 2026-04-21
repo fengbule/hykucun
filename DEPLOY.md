@@ -98,7 +98,8 @@ docker compose logs -f
 ## 6. 更新
 
 ```bash
-git pull
+cd ~/hykucun/hykucun
+git pull --ff-only origin main
 docker compose up -d --build
 ```
 
