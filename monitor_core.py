@@ -18,6 +18,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "url": DEFAULT_URL,
     "request_backend": "requests",
     "browser_wait_seconds": 8,
+    "cookie_header": "",
     "product_selector": ".product-card",
     "title_selector": ".product-card-header h5, h5",
     "stock_selector": ".stock-info",
@@ -224,17 +225,13 @@ def contains_any(text: str, words: list[str]) -> bool:
 
 def parse_whmcs_products(soup: BeautifulSoup, config: dict[str, Any]) -> list[Product]:
     products: list[Product] = []
-    headings = soup.find_all(["h3", "h4"])
+    headings = soup.find_all(["h2", "h3", "h4", "h5", "h6"])
     for heading in headings:
         title = clean_text(heading.get_text(" ", strip=True))
         if not looks_like_product_heading(title):
             continue
 
         container = whmcs_product_container(heading)
-        card_text = clean_text(container.get_text(" ", strip=True))
-        if not contains_any(card_text, split_words(config.get("in_stock_words") or "")):
-            continue
-
         products.append(parse_whmcs_product_section(title, container, config))
     return dedupe_products(products)
 
@@ -251,7 +248,31 @@ def looks_like_product_heading(title: str) -> bool:
     }
     if lowered in blocked:
         return False
-    return "." in title or any(token in lowered for token in ("vps", "server", "tri", "bgp"))
+
+    if "." in title:
+        return True
+
+    strong_tokens = (
+        "vps",
+        "vmiss",
+        "vmess",
+        "kvm",
+        "server",
+        "cloud",
+        "bgp",
+        "cn2",
+        "iepl",
+        "三网",
+        "优化",
+        "线路",
+        "香港",
+        "日本",
+        "美国",
+    )
+    if any(token in lowered for token in strong_tokens):
+        return True
+
+    return bool(re.search(r"\d+\s*(?:g|gb|tb|m|mb|核|core|vcpu)", lowered, re.IGNORECASE))
 
 
 def whmcs_product_container(heading: Any) -> Any:
@@ -344,23 +365,49 @@ def dedupe_products(products: list[Product]) -> list[Product]:
 
 
 def detect_blocked_page(html_text: str) -> None:
-    lowered = html_text[:12000].lower()
-    if "cf_chl_opt" in lowered or "just a moment..." in lowered:
+    snippet = html_text[:20000]
+    lowered = snippet.lower()
+    blocked_markers = (
+        "cf_chl_opt",
+        "just a moment...",
+        "checking your browser",
+        "security check",
+        "ddos-guard",
+        "captcha",
+    )
+    blocked_markers_zh = (
+        "正在进行安全验证",
+        "验证您不是自动程序",
+        "安全服务",
+        "人机验证",
+    )
+    if any(marker in lowered for marker in blocked_markers) or any(
+        marker in snippet for marker in blocked_markers_zh
+    ):
         raise RuntimeError(
-            "Cloudflare challenge page detected. Switch this monitor to Browser mode. "
-            "If it still fails, the site requires an interactive human verification."
+            "Security verification page detected (Cloudflare/CAPTCHA). "
+            "Switch this monitor to Browser mode. "
+            "If still blocked, set a valid Cookie header (for example cf_clearance). "
+            "If it still fails, the site requires interactive human verification "
+            "and cannot be monitored reliably by backend automation."
         )
 
 
 def fetch_html_with_requests(config: dict[str, Any], timeout: int) -> str:
+    headers = dict(REQUEST_HEADERS)
+    cookie_header = clean_text(str(config.get("cookie_header") or ""))
+    if cookie_header:
+        headers["Cookie"] = cookie_header
+
     response = requests.get(
         config["url"],
-        headers=REQUEST_HEADERS,
+        headers=headers,
         timeout=timeout,
     )
     if response.headers.get("cf-mitigated", "").lower() == "challenge":
         raise RuntimeError(
-            "Cloudflare challenge returned 403. Switch this monitor to Browser mode."
+            "Cloudflare challenge returned 403. Switch this monitor to Browser mode, "
+            "or provide a valid Cookie header (for example cf_clearance)."
         )
     response.raise_for_status()
     return response.text
@@ -377,25 +424,26 @@ def fetch_html_with_browser(config: dict[str, Any], timeout: int) -> str:
         ) from exc
 
     wait_seconds = max(0, int(config.get("browser_wait_seconds") or 0))
-    user_data_dir = config.get("browser_user_data_dir") or "/data/browser-profile"
-    if os_name_is_windows():
-        user_data_dir = "data/browser-profile"
 
     with sync_playwright() as p:
-        context = p.chromium.launch_persistent_context(
-            user_data_dir=user_data_dir,
+        browser = p.chromium.launch(
             headless=True,
-            user_agent=REQUEST_HEADERS["User-Agent"],
-            locale="zh-CN",
-            args=[
-                "--disable-dev-shm-usage",
-                "--no-sandbox",
-                "--disable-blink-features=AutomationControlled",
-            ],
+            args=["--no-sandbox"],
         )
+        cookie_header = clean_text(str(config.get("cookie_header") or ""))
+        extra_headers = {"Cookie": cookie_header} if cookie_header else None
+        context = browser.new_context(extra_http_headers=extra_headers)
         page = context.new_page()
         try:
-            page.goto(config["url"], wait_until="domcontentloaded", timeout=timeout * 1000)
+            try:
+                page.goto(config["url"], wait_until="domcontentloaded", timeout=timeout * 1000)
+            except PlaywrightTimeoutError as exc:
+                raise RuntimeError(
+                    "Browser mode timed out while loading target page. "
+                    "The site may be under anti-bot challenge or network throttling. "
+                    "Try increasing browser wait seconds, using a valid Cookie header, "
+                    "or running from a residential IP."
+                ) from exc
             if wait_seconds:
                 page.wait_for_timeout(wait_seconds * 1000)
             try:
@@ -405,13 +453,8 @@ def fetch_html_with_browser(config: dict[str, Any], timeout: int) -> str:
             html_text = page.content()
         finally:
             context.close()
+            browser.close()
     return html_text
-
-
-def os_name_is_windows() -> bool:
-    import os
-
-    return os.name == "nt"
 
 
 def fetch_products(config: dict[str, Any], timeout: int = 15) -> list[Product]:

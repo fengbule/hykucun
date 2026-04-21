@@ -18,6 +18,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--aff-template", default="")
     parser.add_argument("--request-backend", choices=["requests", "browser"], default="requests")
     parser.add_argument("--browser-wait-seconds", type=int, default=8)
+    parser.add_argument("--cookie-header", default="")
     parser.add_argument("--product-selector", default=DEFAULT_CONFIG["product_selector"])
     parser.add_argument("--title-selector", default=DEFAULT_CONFIG["title_selector"])
     parser.add_argument("--stock-selector", default=DEFAULT_CONFIG["stock_selector"])
@@ -52,6 +53,7 @@ def args_to_config(args: argparse.Namespace) -> dict:
             "aff_template": args.aff_template,
             "request_backend": args.request_backend,
             "browser_wait_seconds": args.browser_wait_seconds,
+            "cookie_header": args.cookie_header,
             "product_selector": args.product_selector,
             "title_selector": args.title_selector,
             "stock_selector": args.stock_selector,
