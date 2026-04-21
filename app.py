@@ -26,6 +26,8 @@ from monitor_core import telegram_product_card
 
 DB_LOCK = threading.Lock()
 SCHEDULER_STARTED = False
+INSECURE_SECRET_KEYS = {"change-this-secret"}
+INSECURE_WEBUI_PASSWORDS = {"change-this-password"}
 
 
 def now_str() -> str:
@@ -130,6 +132,7 @@ def init_db() -> None:
         ensure_column(conn, "monitors", "request_backend", "TEXT NOT NULL DEFAULT 'requests'")
         ensure_column(conn, "monitors", "browser_wait_seconds", "INTEGER NOT NULL DEFAULT 8")
         ensure_column(conn, "monitors", "cookie_header", "TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "monitors", "title_filter", "TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "products", "unavailable_since", "TEXT")
 
         count = conn.execute("SELECT COUNT(*) FROM monitors").fetchone()[0]
@@ -556,9 +559,24 @@ def require_login(app: Flask) -> None:
         return redirect(url_for("login"))
 
 
+def validate_runtime_secrets() -> None:
+    secret_key = os.getenv("SECRET_KEY", "")
+    webui_password = os.getenv("WEBUI_PASSWORD", "")
+    if secret_key in INSECURE_SECRET_KEYS:
+        raise RuntimeError(
+            "SECRET_KEY is using a public placeholder. Set a unique random value."
+        )
+    if webui_password in INSECURE_WEBUI_PASSWORDS:
+        raise RuntimeError(
+            "WEBUI_PASSWORD is using a public placeholder. Set a private password "
+            "or leave it empty only on a trusted private network."
+        )
+
+
 def create_app() -> Flask:
+    validate_runtime_secrets()
     app = Flask(__name__)
-    app.secret_key = os.getenv("SECRET_KEY", os.urandom(24))
+    app.secret_key = os.getenv("SECRET_KEY") or os.urandom(24)
     init_db()
     require_login(app)
 
