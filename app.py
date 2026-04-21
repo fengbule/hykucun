@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -71,6 +72,7 @@ def init_db() -> None:
                 interval_seconds INTEGER NOT NULL DEFAULT 60,
                 request_backend TEXT NOT NULL DEFAULT 'requests',
                 browser_wait_seconds INTEGER NOT NULL DEFAULT 8,
+                cookie_header TEXT NOT NULL DEFAULT '',
                 aff_template TEXT NOT NULL DEFAULT '',
                 product_selector TEXT NOT NULL DEFAULT '.product-card',
                 title_selector TEXT NOT NULL DEFAULT '.product-card-header h5, h5',
@@ -115,6 +117,7 @@ def init_db() -> None:
 
         ensure_column(conn, "monitors", "request_backend", "TEXT NOT NULL DEFAULT 'requests'")
         ensure_column(conn, "monitors", "browser_wait_seconds", "INTEGER NOT NULL DEFAULT 8")
+        ensure_column(conn, "monitors", "cookie_header", "TEXT NOT NULL DEFAULT ''")
 
         count = conn.execute("SELECT COUNT(*) FROM monitors").fetchone()[0]
         if count == 0 and os.getenv("SEED_DEFAULT_MONITOR", "1") != "0":
@@ -128,11 +131,11 @@ def insert_default_monitor(conn: sqlite3.Connection) -> None:
         """
         INSERT INTO monitors (
             name, url, enabled, interval_seconds, aff_template,
-            request_backend, browser_wait_seconds,
+            request_backend, browser_wait_seconds, cookie_header,
             product_selector, title_selector, stock_selector, price_selector,
             button_selector, link_selector, stock_regex, in_stock_words,
             out_of_stock_words, created_at, updated_at
-        ) VALUES (?, ?, 1, 60, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, 1, 60, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             values["name"],
@@ -140,6 +143,7 @@ def insert_default_monitor(conn: sqlite3.Connection) -> None:
             values["aff_template"],
             values["request_backend"],
             values["browser_wait_seconds"],
+            values.get("cookie_header", ""),
             values["product_selector"],
             values["title_selector"],
             values["stock_selector"],
@@ -195,6 +199,7 @@ def monitor_config(row: sqlite3.Row) -> dict[str, Any]:
         "url",
         "request_backend",
         "browser_wait_seconds",
+        "cookie_header",
         "aff_template",
         "product_selector",
         "title_selector",
@@ -215,8 +220,58 @@ def title_matches(product: Product, title_filter: str) -> bool:
     filters = [item for item in filters if item]
     if not filters:
         return True
+
+    def normalize(value: str) -> str:
+        lowered = value.lower()
+        return re.sub(r"[\s\-_/|·•,，;；:：()（）\[\]【】]+", "", lowered)
+
     title = product.title.lower()
-    return any(item in title for item in filters)
+    normalized_title = normalize(product.title)
+    for item in filters:
+        if item in title:
+            return True
+        normalized_item = normalize(item)
+        if normalized_item and normalized_item in normalized_title:
+            return True
+    return False
+
+
+def classify_monitor_failure(
+    error_text: str,
+    config: dict[str, Any],
+    previous_status: str | None,
+) -> tuple[str, str]:
+    lowered = (error_text or "").lower()
+    has_cookie = bool(str(config.get("cookie_header") or "").strip())
+    challenge_hit = any(
+        marker in lowered
+        for marker in (
+            "cloudflare challenge returned 403",
+            "security verification page detected",
+            "captcha",
+            "just a moment",
+        )
+    )
+
+    if not challenge_hit:
+        return "error", error_text
+
+    if not has_cookie:
+        return (
+            "cookie_required",
+            "目标站点启用了安全验证。请切换 Browser 模式并配置有效 Cookie（如 cf_clearance）。",
+        )
+
+    if previous_status == "ok":
+        return (
+            "cookie_expiring",
+            "检测到安全验证，Cookie 可能即将失效，请尽快更新 cf_clearance。",
+        )
+
+    return (
+        "cookie_expired",
+        "检测到安全验证，Cookie 可能已失效，请更新 Cookie 后重试。",
+    )
 
 
 def previous_product_state(conn: sqlite3.Connection, monitor_id: int) -> dict[str, dict[str, Any]]:
@@ -368,8 +423,7 @@ def check_monitor_once(monitor_id: int) -> tuple[bool, str]:
         products = []
         restocked = []
         available_count = 0
-        status = "error"
-        error = str(exc)
+        status, error = classify_monitor_failure(str(exc), config, row["last_status"])
 
     with DB_LOCK, connect_db() as conn:
         if products:
@@ -388,7 +442,12 @@ def check_monitor_once(monitor_id: int) -> tuple[bool, str]:
             log_event(conn, monitor_id, "error", error)
             return False, error
 
-        if status == "no_products":
+        if status in {
+            "no_products",
+            "cookie_required",
+            "cookie_expiring",
+            "cookie_expired",
+        }:
             log_event(conn, monitor_id, "warning", error)
             return False, error
 
@@ -550,6 +609,7 @@ def create_app() -> Flask:
             "browser_wait_seconds": max(
                 0, request.form.get("browser_wait_seconds", type=int) or 0
             ),
+            "cookie_header": request.form.get("cookie_header", "").strip(),
             "aff_template": request.form.get("aff_template", "").strip(),
             "product_selector": request.form.get("product_selector", "").strip()
             or DEFAULT_CONFIG["product_selector"],
@@ -582,6 +642,7 @@ def create_app() -> Flask:
                     UPDATE monitors SET
                         name = ?, url = ?, enabled = ?, interval_seconds = ?,
                         request_backend = ?, browser_wait_seconds = ?,
+                        cookie_header = ?,
                         aff_template = ?, product_selector = ?, title_selector = ?,
                         stock_selector = ?, price_selector = ?, button_selector = ?,
                         link_selector = ?, stock_regex = ?, in_stock_words = ?,
@@ -595,6 +656,7 @@ def create_app() -> Flask:
                         payload["interval_seconds"],
                         payload["request_backend"],
                         payload["browser_wait_seconds"],
+                        payload["cookie_header"],
                         payload["aff_template"],
                         payload["product_selector"],
                         payload["title_selector"],
@@ -616,12 +678,12 @@ def create_app() -> Flask:
                     """
                     INSERT INTO monitors (
                         name, url, enabled, interval_seconds,
-                        request_backend, browser_wait_seconds, aff_template,
+                        request_backend, browser_wait_seconds, cookie_header, aff_template,
                         product_selector, title_selector, stock_selector,
                         price_selector, button_selector, link_selector,
                         stock_regex, in_stock_words, out_of_stock_words,
                         title_filter, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         payload["name"],
@@ -630,6 +692,7 @@ def create_app() -> Flask:
                         payload["interval_seconds"],
                         payload["request_backend"],
                         payload["browser_wait_seconds"],
+                        payload["cookie_header"],
                         payload["aff_template"],
                         payload["product_selector"],
                         payload["title_selector"],

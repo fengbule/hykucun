@@ -112,6 +112,11 @@
         </div>
 
         <label>
+          Cookie（可选，防护站点用）
+          <input name="cookie_header" value="{{ form_monitor['cookie_header'] if form_monitor['cookie_header'] is defined else '' }}" placeholder="cf_clearance=...; __cf_bm=...">
+        </label>
+
+        <label>
           AFF 前缀/模板
           <input name="aff_template" value="{{ form_monitor['aff_template'] }}" placeholder="?aff=123 或 https://x/?u={encoded_url}">
         </label>
@@ -179,7 +184,15 @@
         <div class="meta">
           <span>间隔 {{ monitor.interval_seconds }} 秒</span>
           <span>模式 {{ monitor.request_backend }}</span>
-          <span>状态 {{ monitor.last_status }}</span>
+          <span>状态 {{ {
+            'pending': '等待检查',
+            'ok': '正常',
+            'no_products': '无商品',
+            'error': '错误',
+            'cookie_required': '需Cookie',
+            'cookie_expiring': 'Cookie将失效',
+            'cookie_expired': 'Cookie已失效'
+          }.get(monitor.last_status, monitor.last_status) }}</span>
           <span>上次 {{ monitor.last_checked_at or '未检查' }}</span>
         </div>
         {% if monitor.last_error %}
