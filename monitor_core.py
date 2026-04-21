@@ -228,7 +228,8 @@ def fetch_html_with_browser(config: dict[str, Any], timeout: int) -> str:
         from playwright.sync_api import sync_playwright
     except ImportError as exc:
         raise RuntimeError(
-            "Browser mode requires Playwright. Rebuild the Docker image after updating."
+            "Browser mode requires Playwright. Rebuild with Dockerfile.browser: "
+            "docker compose -f docker-compose.yml -f docker-compose.browser.yml up -d --build"
         ) from exc
 
     wait_seconds = max(0, int(config.get("browser_wait_seconds") or 0))
