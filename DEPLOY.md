@@ -37,7 +37,7 @@ services:
 docker compose up -d --build
 ```
 
-默认镜像不安装 Playwright/Chromium，占用更低，适合核云这类普通 HTML 页面。
+默认镜像内置 Playwright/Chromium，WebUI 可以直接在 Requests 和 Browser 模式之间切换。
 
 ## 3. WebUI 配置
 
@@ -92,12 +92,6 @@ docker compose up -d --build
 ## 7. Cloudflare 403
 
 如果监控 VMISS 这类网站出现 `403 Client Error: Forbidden`，通常是 Cloudflare challenge。编辑监控项，把 `请求模式` 改为 `Browser 浏览器模式`，并把 `浏览器等待秒数` 调到 `10-20` 秒。
-
-浏览器模式需要单独使用浏览器镜像：
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.browser.yml up -d --build
-```
 
 浏览器模式占用明显更高，建议监控间隔设置为 `300-600` 秒，不要 10 秒或 20 秒跑一次。
 

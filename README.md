@@ -6,7 +6,7 @@
 
 - 多监控网页配置
 - 每个监控项独立设置检测间隔、CSS 选择器、库存正则和标题过滤
-- 默认轻量 Requests 镜像，可选 Playwright Browser 镜像
+- Docker 镜像内置 Playwright Chromium，可在 WebUI 直接切换 Requests / Browser
 - 每个监控项独立配置 AFF 前缀/模板
 - Telegram 推送 HTML 商品卡片和购买按钮
 - SQLite 保存配置和库存快照
@@ -107,13 +107,7 @@ python restock_monitor.py --once --aff-template "?aff=123"
 Cloudflare challenge returned 403
 ```
 
-说明目标站拦截了普通后台请求。编辑这个监控项，把 `请求模式` 改为 `Browser 浏览器模式`，并把 `浏览器等待秒数` 调到 `10-20` 秒。浏览器镜像会内置 Playwright Chromium。
-
-默认 Docker 镜像不安装浏览器，适合核云这类普通 HTML 页面，占用更低。如果确实要监控 VMISS 这类 Cloudflare 页面，再用浏览器镜像：
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.browser.yml up -d --build
-```
+说明目标站拦截了普通后台请求。编辑这个监控项，把 `请求模式` 改为 `Browser 浏览器模式`，并把 `浏览器等待秒数` 调到 `10-20` 秒。Docker 镜像内置 Playwright Chromium，所以 WebUI 可以直接切换模式。
 
 浏览器模式占用明显更高，建议把这类监控间隔调到 `300-600` 秒，不要 10 秒或 20 秒跑一次。
 

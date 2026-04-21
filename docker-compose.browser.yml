@@ -1,5 +1,0 @@
-services:
-  heyunidc-monitor:
-    build:
-      context: .
-      dockerfile: Dockerfile.browser
