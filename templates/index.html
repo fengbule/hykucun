@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>库存监控</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>库存监控</h1>
+      <p>HeyunIDC Restock Monitor</p>
+    </div>
+    {% if auth_enabled %}
+    <form method="post" action="{{ url_for('logout') }}">
+      <button class="ghost" type="submit">退出</button>
+    </form>
+    {% endif %}
+  </header>
+
+  <main class="layout">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        <div class="messages">
+          {% for category, message in messages %}
+            <div class="message {{ category }}">{{ message }}</div>
+          {% endfor %}
+        </div>
+      {% endif %}
+    {% endwith %}
+
+    <section class="panel settings">
+      <div class="panel-title">
+        <h2>Telegram</h2>
+        <form method="post" action="{{ url_for('test_telegram') }}">
+          <button class="ghost" type="submit">测试</button>
+        </form>
+      </div>
+      <form class="grid-form" method="post" action="{{ url_for('update_settings') }}">
+        <label>
+          Bot Token
+          <input type="password" name="telegram_bot_token" value="{{ settings.telegram_bot_token }}" autocomplete="off">
+        </label>
+        <label>
+          Chat ID
+          <input name="telegram_chat_id" value="{{ settings.telegram_chat_id }}" autocomplete="off">
+        </label>
+        <label>
+          Topic ID
+          <input name="telegram_message_thread_id" value="{{ settings.telegram_message_thread_id }}" autocomplete="off">
+        </label>
+        <div class="form-actions">
+          <button type="submit">保存 Telegram</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="panel editor">
+      <div class="panel-title">
+        <h2>{{ '编辑监控' if edit_monitor else '新增监控' }}</h2>
+        {% if edit_monitor %}
+          <a class="ghost link-button" href="{{ url_for('index') }}">新建</a>
+        {% endif %}
+      </div>
+
+      <form class="monitor-form" method="post" action="{{ url_for('save_monitor') }}">
+        {% if edit_monitor %}
+          <input type="hidden" name="id" value="{{ edit_monitor.id }}">
+        {% endif %}
+
+        <div class="form-row two">
+          <label>
+            名称
+            <input name="name" value="{{ form_monitor['name'] }}" required>
+          </label>
+          <label class="inline-check">
+            <input type="checkbox" name="enabled" {% if (edit_monitor and edit_monitor.enabled) or not edit_monitor %}checked{% endif %}>
+            启用
+          </label>
+        </div>
+
+        <label>
+          监控网页
+          <input name="url" value="{{ form_monitor['url'] }}" required>
+        </label>
+
+        <div class="form-row two">
+          <label>
+            间隔秒数
+            <input type="number" min="10" name="interval_seconds" value="{{ edit_monitor.interval_seconds if edit_monitor else 60 }}">
+          </label>
+          <label>
+            标题过滤
+            <input name="title_filter" value="{{ edit_monitor.title_filter if edit_monitor else '' }}" placeholder="香港,4H">
+          </label>
+        </div>
+
+        <label>
+          AFF 前缀/模板
+          <input name="aff_template" value="{{ form_monitor['aff_template'] }}" placeholder="?aff=123 或 https://x/?u={encoded_url}">
+        </label>
+
+        <div class="selector-grid">
+          <label>
+            商品卡片
+            <input name="product_selector" value="{{ form_monitor['product_selector'] }}">
+          </label>
+          <label>
+            标题
+            <input name="title_selector" value="{{ form_monitor['title_selector'] }}">
+          </label>
+          <label>
+            库存
+            <input name="stock_selector" value="{{ form_monitor['stock_selector'] }}">
+          </label>
+          <label>
+            价格
+            <input name="price_selector" value="{{ form_monitor['price_selector'] }}">
+          </label>
+          <label>
+            按钮
+            <input name="button_selector" value="{{ form_monitor['button_selector'] }}">
+          </label>
+          <label>
+            链接
+            <input name="link_selector" value="{{ form_monitor['link_selector'] }}">
+          </label>
+        </div>
+
+        <div class="form-row three">
+          <label>
+            库存正则
+            <input name="stock_regex" value="{{ form_monitor['stock_regex'] }}">
+          </label>
+          <label>
+            有货词
+            <input name="in_stock_words" value="{{ form_monitor['in_stock_words'] }}">
+          </label>
+          <label>
+            缺货词
+            <input name="out_of_stock_words" value="{{ form_monitor['out_of_stock_words'] }}">
+          </label>
+        </div>
+
+        <div class="form-actions">
+          <button type="submit">{{ '保存修改' if edit_monitor else '添加监控' }}</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="monitor-list">
+      {% for monitor in monitors %}
+      <article class="monitor-card">
+        <div class="monitor-head">
+          <div>
+            <h2>{{ monitor.name }}</h2>
+            <a href="{{ monitor.url }}" target="_blank" rel="noreferrer">{{ monitor.url }}</a>
+          </div>
+          <span class="status {{ 'enabled' if monitor.enabled else 'disabled' }}">
+            {{ '运行中' if monitor.enabled else '已停用' }}
+          </span>
+        </div>
+        <div class="meta">
+          <span>间隔 {{ monitor.interval_seconds }} 秒</span>
+          <span>状态 {{ monitor.last_status }}</span>
+          <span>上次 {{ monitor.last_checked_at or '未检查' }}</span>
+        </div>
+        {% if monitor.last_error %}
+          <div class="inline-error">{{ monitor.last_error }}</div>
+        {% endif %}
+
+        <div class="product-table">
+          <div class="product-row head">
+            <span>商品</span>
+            <span>库存</span>
+            <span>状态</span>
+            <span>价格</span>
+          </div>
+          {% for product in products_by_monitor[monitor.id] %}
+          <div class="product-row">
+            <a href="{{ product.purchase_url }}" target="_blank" rel="noreferrer">{{ product.title }}</a>
+            <span>{{ product.stock if product.stock is not none else '未知' }}</span>
+            <span class="{{ 'ok' if product.available else 'muted' }}">{{ '可购买' if product.available else product.status }}</span>
+            <span>{{ product.price or '未知' }}</span>
+          </div>
+          {% else %}
+          <div class="empty">暂无商品快照</div>
+          {% endfor %}
+        </div>
+
+        <div class="card-actions">
+          <form method="post" action="{{ url_for('check_monitor', monitor_id=monitor.id) }}">
+            <button type="submit">立即检查</button>
+          </form>
+          <a class="ghost link-button" href="{{ url_for('index', edit=monitor.id) }}">编辑</a>
+          <form method="post" action="{{ url_for('toggle_monitor', monitor_id=monitor.id) }}">
+            <button class="ghost" type="submit">{{ '停用' if monitor.enabled else '启用' }}</button>
+          </form>
+          <form method="post" action="{{ url_for('delete_monitor', monitor_id=monitor.id) }}" onsubmit="return confirm('删除这个监控项？')">
+            <button class="danger" type="submit">删除</button>
+          </form>
+        </div>
+      </article>
+      {% else %}
+      <div class="empty panel">暂无监控项</div>
+      {% endfor %}
+    </section>
+
+    <section class="panel events">
+      <div class="panel-title">
+        <h2>事件</h2>
+      </div>
+      {% for event in events %}
+      <div class="event-row">
+        <span class="event-time">{{ event.created_at }}</span>
+        <span class="event-level {{ event.level }}">{{ event.level }}</span>
+        <span>{{ event.monitor_name or '系统' }}：{{ event.message }}</span>
+      </div>
+      {% else %}
+      <div class="empty">暂无事件</div>
+      {% endfor %}
+    </section>
+  </main>
+</body>
+</html>

@@ -1,0 +1,85 @@
+# Docker 部署说明
+
+## 1. 启动服务
+
+```bash
+git clone https://github.com/fengbule/heyunidc.git
+cd heyunidc
+docker compose up -d --build
+```
+
+默认监听 `8000` 端口：
+
+```text
+http://服务器IP:8000
+```
+
+## 2. 必改环境变量
+
+建议创建 `docker-compose.override.yml`，覆盖默认密钥：
+
+```yaml
+services:
+  heyunidc-monitor:
+    environment:
+      SECRET_KEY: "换成随机字符串"
+      WEBUI_PASSWORD: "换成你的WebUI密码"
+      TELEGRAM_BOT_TOKEN: "你的BotToken"
+      TELEGRAM_CHAT_ID: "你的ChatID"
+      TELEGRAM_MESSAGE_THREAD_ID: ""
+```
+
+然后重启：
+
+```bash
+docker compose up -d --build
+```
+
+## 3. WebUI 配置
+
+进入 WebUI 后可以配置：
+
+- Telegram Bot Token / Chat ID / Topic ID
+- 监控网页 URL
+- 检测间隔
+- 商品卡片、标题、库存、价格、按钮、购买链接 CSS 选择器
+- 库存正则
+- 有货词和缺货词
+- AFF 前缀/模板
+
+默认已经内置核云周年庆页面：
+
+```text
+https://www.heyunidc.cn/cart?fid=49&gid=97
+```
+
+## 4. AFF 购买链接
+
+Telegram 推送会带 `打开购买链接` 按钮。购买链接会按监控项里的 AFF 配置生成。
+
+示例：
+
+```text
+?aff=123
+```
+
+表示在购买链接后追加 `aff=123`。
+
+```text
+https://example.com/redirect?url={encoded_url}
+```
+
+表示把购买链接 URL 编码后放到模板里。
+
+## 5. 查看日志
+
+```bash
+docker compose logs -f
+```
+
+## 6. 更新
+
+```bash
+git pull
+docker compose up -d --build
+```
