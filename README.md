@@ -31,6 +31,13 @@ TELEGRAM_MESSAGE_THREAD_ID=
 
 项目没有默认 WebUI 密码；忘记密码时，直接修改 `.env` 里的 `WEBUI_PASSWORD` 后重启服务。只在可信内网临时使用时，可以把 `WEBUI_PASSWORD` 留空来关闭 WebUI 登录。
 
+如果你从旧版本升级，服务器上可能还留有 `docker-compose.override.yml` 并覆盖 `.env`。更新后如果容器反复重启并提示 `SECRET_KEY is using a public placeholder`，先清掉旧 override 里的占位值：
+
+```bash
+cp docker-compose.override.yml docker-compose.override.yml.bak.$(date +%s) 2>/dev/null || true
+sed -i '/SECRET_KEY:/d;/WEBUI_PASSWORD:/d' docker-compose.override.yml 2>/dev/null || true
+```
+
 如果服务器面板要求使用外部端口，例如 `1457`，把端口写到同一个 `.env`：
 
 ```bash
