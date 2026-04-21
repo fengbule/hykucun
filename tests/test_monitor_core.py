@@ -102,7 +102,9 @@ class ParseProductsTests(unittest.TestCase):
                         "available": True,
                         "stock": 9,
                         "title": product.title,
+                        "price": product.price,
                         "purchase_url": product.purchase_url,
+                        "restock_notified": True,
                     }
                 },
             ),
@@ -116,11 +118,30 @@ class ParseProductsTests(unittest.TestCase):
                         "available": False,
                         "stock": 0,
                         "title": product.title,
+                        "price": product.price,
                         "purchase_url": product.purchase_url,
+                        "restock_notified": False,
                     }
                 },
             ),
             [product],
+        )
+
+        self.assertEqual(
+            find_restocked_products(
+                [product],
+                {
+                    product.key: {
+                        "available": False,
+                        "stock": 0,
+                        "title": product.title,
+                        "price": product.price,
+                        "purchase_url": product.purchase_url,
+                        "restock_notified": True,
+                    }
+                },
+            ),
+            [],
         )
 
 
