@@ -43,13 +43,14 @@
           <input type="password" name="telegram_bot_token" value="{{ settings.telegram_bot_token }}" autocomplete="off">
         </label>
         <label>
-          Chat ID
-          <input name="telegram_chat_id" value="{{ settings.telegram_chat_id }}" autocomplete="off">
+          Chat ID / @频道用户名
+          <input name="telegram_chat_id" value="{{ settings.telegram_chat_id }}" autocomplete="off" placeholder="@your_channel 或 -1001234567890">
         </label>
         <label>
-          Topic ID
-          <input name="telegram_message_thread_id" value="{{ settings.telegram_message_thread_id }}" autocomplete="off">
+          Topic ID（仅群组话题）
+          <input name="telegram_message_thread_id" value="{{ settings.telegram_message_thread_id }}" autocomplete="off" placeholder="频道留空，论坛群组话题才填写">
         </label>
+        <p>公开频道可直接填 <code>@频道用户名</code>；私有频道填 <code>-100</code> 开头的数字 Chat ID。普通频道不用填 Topic ID，只有带话题的论坛群组才需要。</p>
         <div class="form-actions">
           <button type="submit">保存 Telegram</button>
         </div>
