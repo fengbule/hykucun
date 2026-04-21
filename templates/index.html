@@ -89,7 +89,8 @@
         <div class="form-row two">
           <label>
             间隔秒数
-            <input type="number" min="10" name="interval_seconds" value="{{ edit_monitor.interval_seconds if edit_monitor else 60 }}">
+            <input type="number" min="1" step="1" name="interval_seconds" value="{{ edit_monitor.interval_seconds if edit_monitor else 60 }}">
+            <small>支持在 WebUI 里直接填 1 秒及以上。高频轮询更容易触发风控，建议只对重点页面短时使用。</small>
           </label>
           <label>
             标题过滤
