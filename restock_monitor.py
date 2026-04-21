@@ -76,8 +76,13 @@ def main() -> None:
     while True:
         state = load_state(state_file)
         products = fetch_products(config)
-        current = {product.key: product.to_dict() for product in products}
         restocked = find_restocked_products(products, state.get("products", {}))
+        current = {}
+        for product in products:
+            product_state = product.to_dict()
+            product_state["product_key"] = product.key
+            product_state["restock_notified"] = bool(product.available)
+            current[product.key] = product_state
         available = [product for product in products if product.available]
 
         print(

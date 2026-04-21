@@ -503,7 +503,7 @@ def find_restocked_products(
         if not previous:
             continue
 
-        if not previous.get("available"):
+        if not previous.get("available") and not previous.get("restock_notified"):
             restocked.append(product)
     return restocked
 
@@ -516,13 +516,17 @@ def find_previous_product_state(
         return previous
 
     product_title = clean_text(product.title).casefold()
+    product_price = clean_text(product.price).casefold()
     product_url = clean_text(product.purchase_url)
     for item in previous_products.values():
         previous_title = clean_text(str(item.get("title") or "")).casefold()
+        previous_price = clean_text(str(item.get("price") or "")).casefold()
         previous_url = clean_text(str(item.get("purchase_url") or ""))
         if product_url and previous_url and product_url == previous_url:
             return item
         if product_title and previous_title == product_title:
+            if product_price and previous_price and product_price == previous_price:
+                return item
             if not product_url or not previous_url or product_url == previous_url:
                 return item
     return None

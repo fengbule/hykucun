@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import sqlite3
@@ -122,6 +123,10 @@ def init_db() -> None:
                 price TEXT NOT NULL DEFAULT '',
                 purchase_url TEXT NOT NULL DEFAULT '',
                 unavailable_since TEXT,
+                restock_notified INTEGER NOT NULL DEFAULT 0,
+                telegram_chat_id TEXT NOT NULL DEFAULT '',
+                telegram_message_id INTEGER,
+                telegram_text_hash TEXT NOT NULL DEFAULT '',
                 last_seen_at TEXT NOT NULL,
                 PRIMARY KEY (monitor_id, product_key),
                 FOREIGN KEY (monitor_id) REFERENCES monitors(id) ON DELETE CASCADE
@@ -142,6 +147,10 @@ def init_db() -> None:
         ensure_column(conn, "monitors", "cookie_header", "TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "monitors", "title_filter", "TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "products", "unavailable_since", "TEXT")
+        ensure_column(conn, "products", "restock_notified", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(conn, "products", "telegram_chat_id", "TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "products", "telegram_message_id", "INTEGER")
+        ensure_column(conn, "products", "telegram_text_hash", "TEXT NOT NULL DEFAULT ''")
 
         count = conn.execute("SELECT COUNT(*) FROM monitors").fetchone()[0]
         if count == 0 and os.getenv("SEED_DEFAULT_MONITOR", "1") != "0":
@@ -307,9 +316,16 @@ def previous_product_state(conn: sqlite3.Connection, monitor_id: int) -> dict[st
         row["product_key"]: {
             "available": bool(row["available"]),
             "stock": row["stock"],
+            "price": row["price"],
             "title": row["title"],
+            "status": row["status"],
             "purchase_url": row["purchase_url"],
             "unavailable_since": row["unavailable_since"],
+            "product_key": row["product_key"],
+            "restock_notified": bool(row["restock_notified"]),
+            "telegram_chat_id": row["telegram_chat_id"],
+            "telegram_message_id": row["telegram_message_id"],
+            "telegram_text_hash": row["telegram_text_hash"],
         }
         for row in rows
     }
@@ -319,7 +335,9 @@ def upsert_products(conn: sqlite3.Connection, monitor_id: int, products: list[Pr
     timestamp = now_str()
     existing_rows = conn.execute(
         """
-        SELECT product_key, available, unavailable_since, title, stock, purchase_url
+        SELECT product_key, title, status, available, stock, price, purchase_url,
+               unavailable_since, restock_notified, telegram_chat_id,
+               telegram_message_id, telegram_text_hash
         FROM products
         WHERE monitor_id = ?
         ORDER BY last_seen_at DESC
@@ -330,9 +348,16 @@ def upsert_products(conn: sqlite3.Connection, monitor_id: int, products: list[Pr
         row["product_key"]: {
             "available": bool(row["available"]),
             "stock": row["stock"],
+            "price": row["price"],
             "title": row["title"],
+            "status": row["status"],
             "purchase_url": row["purchase_url"],
             "unavailable_since": row["unavailable_since"],
+            "product_key": row["product_key"],
+            "restock_notified": bool(row["restock_notified"]),
+            "telegram_chat_id": row["telegram_chat_id"],
+            "telegram_message_id": row["telegram_message_id"],
+            "telegram_text_hash": row["telegram_text_hash"],
         }
         for row in existing_rows
     }
@@ -341,10 +366,27 @@ def upsert_products(conn: sqlite3.Connection, monitor_id: int, products: list[Pr
         previous = find_previous_product_state(product, existing)
         if product.available:
             unavailable_since = None
+            restock_notified = 1
         elif previous and not bool(previous["available"]) and previous.get("unavailable_since"):
             unavailable_since = previous["unavailable_since"]
+            restock_notified = 0
         else:
             unavailable_since = timestamp
+            restock_notified = 0
+
+        telegram_chat_id = str(previous.get("telegram_chat_id") or "") if previous else ""
+        telegram_message_id = previous.get("telegram_message_id") if previous else None
+        telegram_text_hash = str(previous.get("telegram_text_hash") or "") if previous else ""
+        previous_key = previous.get("product_key") if previous else None
+        if previous_key and previous_key != product.key:
+            conn.execute(
+                """
+                DELETE FROM products
+                WHERE monitor_id = ?
+                  AND product_key = ?
+                """,
+                (monitor_id, previous_key),
+            )
 
         if product.purchase_url:
             conn.execute(
@@ -361,8 +403,10 @@ def upsert_products(conn: sqlite3.Connection, monitor_id: int, products: list[Pr
             """
             INSERT INTO products (
                 monitor_id, product_key, title, status, available, stock,
-                price, purchase_url, unavailable_since, last_seen_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                price, purchase_url, unavailable_since, restock_notified,
+                telegram_chat_id, telegram_message_id, telegram_text_hash,
+                last_seen_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(monitor_id, product_key) DO UPDATE SET
                 title = excluded.title,
                 status = excluded.status,
@@ -371,6 +415,10 @@ def upsert_products(conn: sqlite3.Connection, monitor_id: int, products: list[Pr
                 price = excluded.price,
                 purchase_url = excluded.purchase_url,
                 unavailable_since = excluded.unavailable_since,
+                restock_notified = excluded.restock_notified,
+                telegram_chat_id = excluded.telegram_chat_id,
+                telegram_message_id = excluded.telegram_message_id,
+                telegram_text_hash = excluded.telegram_text_hash,
                 last_seen_at = excluded.last_seen_at
             """,
             (
@@ -383,6 +431,10 @@ def upsert_products(conn: sqlite3.Connection, monitor_id: int, products: list[Pr
                 product.price,
                 product.purchase_url,
                 unavailable_since,
+                restock_notified,
+                telegram_chat_id,
+                telegram_message_id,
+                telegram_text_hash,
                 timestamp,
             ),
         )
@@ -397,20 +449,93 @@ def log_event(
     )
 
 
+def telegram_text_hash(text: str) -> str:
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+
+def update_product_telegram_message(
+    conn: sqlite3.Connection,
+    monitor_id: int,
+    product: Product,
+    chat_id: str,
+    message_id: int | None,
+    text_hash: str,
+) -> None:
+    conn.execute(
+        """
+        UPDATE products
+        SET telegram_chat_id = ?,
+            telegram_message_id = ?,
+            telegram_text_hash = ?
+        WHERE monitor_id = ?
+          AND product_key = ?
+        """,
+        (chat_id, message_id, text_hash, monitor_id, product.key),
+    )
+
+
+def product_display_changed(product: Product, previous: dict[str, Any]) -> bool:
+    return any(
+        (
+            bool(previous.get("available")) != product.available,
+            previous.get("stock") != product.stock,
+            str(previous.get("status") or "") != product.status,
+            str(previous.get("title") or "") != product.title,
+            str(previous.get("price") or "") != product.price,
+            str(previous.get("purchase_url") or "") != product.purchase_url,
+        )
+    )
+
+
+def telegram_products_to_edit(
+    products: list[Product],
+    previous_products: dict[str, dict[str, Any]],
+    restocked: list[Product],
+    settings: dict[str, str],
+    monitor_name: str,
+) -> list[tuple[Product, dict[str, Any], str]]:
+    chat_id = settings.get("telegram_chat_id", "").strip()
+    if not chat_id:
+        return []
+
+    restocked_keys = {product.key for product in restocked}
+    edits: list[tuple[Product, dict[str, Any], str]] = []
+    for product in products:
+        if product.key in restocked_keys:
+            continue
+
+        previous = find_previous_product_state(product, previous_products)
+        if not previous or not previous.get("telegram_message_id"):
+            continue
+
+        previous_chat_id = str(previous.get("telegram_chat_id") or "")
+        if previous_chat_id and previous_chat_id != chat_id:
+            continue
+
+        text = telegram_product_card(monitor_name, product)
+        if previous.get("telegram_text_hash") == telegram_text_hash(text):
+            continue
+
+        if product_display_changed(product, previous):
+            edits.append((product, previous, text))
+    return edits
+
+
 def send_telegram_product(
     settings: dict[str, str],
     monitor_name: str,
     product: Product,
     stock_transition: str | None = None,
-) -> tuple[bool, str]:
+) -> tuple[bool, str, int | None]:
     bot_token = settings.get("telegram_bot_token", "").strip()
     chat_id = settings.get("telegram_chat_id", "").strip()
     if not bot_token or not chat_id:
-        return False, "Telegram token 或 chat id 未配置"
+        return False, "Telegram token 或 chat id 未配置", None
 
+    text = telegram_product_card(monitor_name, product, stock_transition)
     payload: dict[str, Any] = {
         "chat_id": chat_id,
-        "text": telegram_product_card(monitor_name, product, stock_transition),
+        "text": text,
         "parse_mode": "HTML",
         "disable_web_page_preview": False,
     }
@@ -432,7 +557,44 @@ def send_telegram_product(
         timeout=15,
     )
     if response.ok:
-        return True, "Telegram 通知已发送"
+        data = response.json()
+        message_id = data.get("result", {}).get("message_id")
+        return True, "Telegram 通知已发送", message_id
+    return False, f"Telegram 返回 HTTP {response.status_code}: {response.text[:300]}", None
+
+
+def edit_telegram_product(
+    settings: dict[str, str],
+    product: Product,
+    message_id: int,
+    text: str,
+) -> tuple[bool, str]:
+    bot_token = settings.get("telegram_bot_token", "").strip()
+    chat_id = settings.get("telegram_chat_id", "").strip()
+    if not bot_token or not chat_id:
+        return False, "Telegram token 或 chat id 未配置"
+
+    payload: dict[str, Any] = {
+        "chat_id": chat_id,
+        "message_id": int(message_id),
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": False,
+    }
+    if product.purchase_url.startswith(("http://", "https://")):
+        payload["reply_markup"] = {
+            "inline_keyboard": [[{"text": "打开购买链接", "url": product.purchase_url}]]
+        }
+
+    response = requests.post(
+        f"https://api.telegram.org/bot{bot_token}/editMessageText",
+        json=payload,
+        timeout=15,
+    )
+    if response.ok:
+        return True, "Telegram 库存消息已更新"
+    if response.status_code == 400 and "message is not modified" in response.text.lower():
+        return True, "Telegram 库存消息无需更新"
     return False, f"Telegram 返回 HTTP {response.status_code}: {response.text[:300]}"
 
 
@@ -477,6 +639,9 @@ def check_monitor_once(monitor_id: int) -> tuple[bool, str]:
         products = fetch_products(config)
         products = [product for product in products if title_matches(product, title_filter)]
         restocked = find_restocked_products(products, previous)
+        telegram_edits = telegram_products_to_edit(
+            products, previous, restocked, settings, config["name"]
+        )
         available_count = sum(1 for product in products if product.available)
         if products:
             status = "ok"
@@ -490,6 +655,7 @@ def check_monitor_once(monitor_id: int) -> tuple[bool, str]:
     except Exception as exc:
         products = []
         restocked = []
+        telegram_edits = []
         available_count = 0
         status, error = classify_monitor_failure(str(exc), config, row["last_status"])
 
@@ -538,7 +704,8 @@ def check_monitor_once(monitor_id: int) -> tuple[bool, str]:
                 elapsed = int((now - unavailable_since).total_seconds())
                 stock_transition = f"{stock_transition}（{format_duration(elapsed)}）"
 
-        ok, telegram_message = send_telegram_product(
+        sent_text = telegram_product_card(config["name"], product, stock_transition)
+        ok, telegram_message, message_id = send_telegram_product(
             settings,
             config["name"],
             product,
@@ -548,11 +715,50 @@ def check_monitor_once(monitor_id: int) -> tuple[bool, str]:
         failed += 0 if ok else 1
         with DB_LOCK, connect_db() as conn:
             level = "info" if ok else "warning"
+            if ok and message_id:
+                update_product_telegram_message(
+                    conn,
+                    monitor_id,
+                    product,
+                    settings.get("telegram_chat_id", "").strip(),
+                    int(message_id),
+                    telegram_text_hash(sent_text),
+                )
+            log_event(conn, monitor_id, level, f"{product.title}: {telegram_message}")
+
+    updated = 0
+    update_failed = 0
+    for product, previous_item, text in telegram_edits:
+        message_id = previous_item.get("telegram_message_id")
+        if not message_id:
+            continue
+
+        ok, telegram_message = edit_telegram_product(
+            settings,
+            product,
+            int(message_id),
+            text,
+        )
+        updated += 1 if ok else 0
+        update_failed += 0 if ok else 1
+        with DB_LOCK, connect_db() as conn:
+            level = "info" if ok else "warning"
+            if ok:
+                update_product_telegram_message(
+                    conn,
+                    monitor_id,
+                    product,
+                    settings.get("telegram_chat_id", "").strip(),
+                    int(message_id),
+                    telegram_text_hash(text),
+                )
             log_event(conn, monitor_id, level, f"{product.title}: {telegram_message}")
 
     suffix = ""
     if restocked:
         suffix = f"，Telegram 成功 {sent} 条，失败 {failed} 条"
+    if telegram_edits:
+        suffix = f"{suffix}，Telegram 更新 {updated} 条，更新失败 {update_failed} 条"
     return True, f"{message}{suffix}"
 
 
