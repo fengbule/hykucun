@@ -62,6 +62,26 @@ http://服务器IP:8000
 http://服务器IP:1457
 ```
 
+## Telegram 频道对接
+
+1. 在 Telegram 里用 `@BotFather` 创建一个 Bot，拿到 Bot Token。
+2. 创建你的频道，把这个 Bot 拉进频道。
+3. 把 Bot 设置成频道管理员，否则 Bot 没法往频道发消息。
+4. 在 WebUI 或 `.env` 里填写：
+
+```env
+TELEGRAM_BOT_TOKEN=123456:ABCDEF_xxx
+TELEGRAM_CHAT_ID=@your_channel_name
+TELEGRAM_MESSAGE_THREAD_ID=
+```
+
+- 公开频道：`TELEGRAM_CHAT_ID` 直接填 `@频道用户名`
+- 私有频道：`TELEGRAM_CHAT_ID` 填频道的数字 Chat ID（通常是 `-100` 开头）
+- 普通频道：`TELEGRAM_MESSAGE_THREAD_ID` 留空
+- 只有带话题的论坛群组，才需要填写 `TELEGRAM_MESSAGE_THREAD_ID`
+
+填好后，在 WebUI 里点一次 `测试`，能收到消息就说明对接成功。
+
 ## 常用更新命令（可直接复制）
 
 在服务器项目目录执行：
