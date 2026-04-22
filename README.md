@@ -8,6 +8,8 @@
 - 每个监控项独立设置检测间隔、CSS 选择器、库存正则和标题过滤
 - Docker 镜像内置 Playwright Chromium，可在 WebUI 直接切换 Requests / Browser
 - 每个监控项独立配置 AFF 前缀/模板
+- 支持“通知通道池”：可预先保存多个 Telegram 机器人/频道配置，再让每个监控项下拉选择通知目标
+- 保留全局默认 Telegram，老配置可继续使用
 - Telegram 推送 HTML 商品卡片和购买按钮
 - 只在商品从缺货恢复为有货时推送一次，库存仍然可购买时不会反复提醒
 - 推送后的商品卡片会在库存、价格或状态变化时自动编辑原消息，频道里不刷屏
@@ -21,13 +23,13 @@ git clone https://github.com/fengbule/hykucun.git
 cd hykucun
 ```
 
-这个仓库是公开仓库，服务器上 `git clone` 不需要 GitHub 账号密码。创建 `.env` 配置 Telegram 和 WebUI 密码，不要把真实密码提交到仓库：
+这个仓库是公开仓库，服务器上 `git clone` 不需要 GitHub 账号密码。创建 `.env` 配置默认 Telegram 和 WebUI 密码，不要把真实密码提交到仓库：
 
 ```env
 SECRET_KEY=换成随机字符串
 WEBUI_PASSWORD=换成你的WebUI密码
-TELEGRAM_BOT_TOKEN=你的BotToken
-TELEGRAM_CHAT_ID=你的ChatID
+TELEGRAM_BOT_TOKEN=你的默认BotToken
+TELEGRAM_CHAT_ID=你的默认ChatID
 TELEGRAM_MESSAGE_THREAD_ID=
 ```
 
@@ -64,12 +66,27 @@ http://服务器IP:8000
 http://服务器IP:1457
 ```
 
+## 通知通道池怎么用
+
+WebUI 里现在分成两层：
+
+1. **默认 Telegram**
+   - 这是全局兜底出口。
+   - 监控项没有绑定单独通道时，就用这里。
+
+2. **通知通道**
+   - 可以新建多个通道，例如：`主频道`、`测试频道`、`私聊提醒`、`香港库存频道`。
+   - 每个通道保存自己的 `Bot Token`、`Chat ID`、`Topic ID`。
+   - 监控项里新增了 `通知目标` 下拉框，可直接选择某个通道。
+
+这样多个监控项可以复用同一个通知目标，后续如果换机器人或换频道，只改那一个通道即可。
+
 ## Telegram 频道对接
 
 1. 在 Telegram 里用 `@BotFather` 创建一个 Bot，拿到 Bot Token。
 2. 创建你的频道，把这个 Bot 拉进频道。
 3. 把 Bot 设置成频道管理员，否则 Bot 没法往频道发消息。
-4. 在 WebUI 或 `.env` 里填写：
+4. 在 WebUI 的 **默认 Telegram** 或 **通知通道** 里填写：
 
 ```env
 TELEGRAM_BOT_TOKEN=123456:ABCDEF_xxx
@@ -82,7 +99,7 @@ TELEGRAM_MESSAGE_THREAD_ID=
 - 普通频道：`TELEGRAM_MESSAGE_THREAD_ID` 留空
 - 只有带话题的论坛群组，才需要填写 `TELEGRAM_MESSAGE_THREAD_ID`
 
-填好后，在 WebUI 里点一次 `测试`，能收到消息就说明对接成功。
+填好后，在 WebUI 里点一次 `测试默认通道` 或某个通知通道的 `测试`，能收到消息就说明对接成功。
 
 ## 常用更新命令（可直接复制）
 
@@ -143,6 +160,14 @@ Windows PowerShell：
 C:\Users\fengbule\codex\.venv\Scripts\python.exe app.py
 ```
 
+## 测试
+
+仓库新增了针对通知通道池的单元测试：
+
+```bash
+python -m unittest discover -s tests -v
+```
+
 ## CLI 检查
 
 ```bash
@@ -172,7 +197,3 @@ cf_clearance=xxxx; __cf_bm=yyyy
 ```
 
 然后再执行立即检查。若 Cookie 失效会再次出现安全验证提示，需要重新获取。
-
-如果浏览器模式显示 `ok` 但没有商品，通常是 CSS 选择器不适配。VMISS/WHMCS 页面常见结构不是 `.product-card`，而是 `h3 产品名 + Order Now + 0 Available`。程序会自动用 WHMCS 兜底解析；升级后仍无商品时，先清空标题过滤，再点一次立即检查。
-
-VMISS 页面里可能自带 `recaptchaSiteKey` 变量，这不一定代表当前请求被安全验证拦截。程序会先尝试解析套餐，只有完全解析不到商品并命中 Cloudflare/安全验证特征时，才提示 Cookie 或 Browser 模式。
