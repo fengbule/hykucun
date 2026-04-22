@@ -248,7 +248,16 @@
         <div class="meta">
           <span>间隔 {{ monitor.interval_seconds }} 秒</span>
           <span>模式 {{ monitor.request_backend }}</span>
-          <span>通知 {{ monitor.notification_target_name or default_target.display_label }}</span>
+          <span>
+            通知
+            {% if monitor.notification_target_name and monitor.notification_target_enabled %}
+              {{ monitor.notification_target_name }}
+            {% elif monitor.notification_target_name %}
+              {{ default_target.display_label }}（{{ monitor.notification_target_name }} 已停用）
+            {% else %}
+              {{ default_target.display_label }}
+            {% endif %}
+          </span>
           <span>状态 {{ {
             'pending': '等待检查',
             'ok': '正常',

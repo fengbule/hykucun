@@ -39,6 +39,14 @@ DEFAULT_SCHEDULER_TICK_SECONDS = 1.0
 DEFAULT_NOTIFICATION_TARGET_NAME = "默认 Telegram"
 
 
+class ClosingConnection(sqlite3.Connection):
+    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> bool:
+        try:
+            return bool(super().__exit__(exc_type, exc_value, traceback))
+        finally:
+            self.close()
+
+
 def now_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -72,8 +80,9 @@ def database_path() -> Path:
 
 
 def connect_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(database_path(), timeout=30)
+    conn = sqlite3.connect(database_path(), timeout=30, factory=ClosingConnection)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 
@@ -303,6 +312,23 @@ def save_notification_target(conn: sqlite3.Connection, target_id: int | None, fo
         (name, bot_token, chat_id, thread_id, enabled, timestamp, timestamp),
     )
     return int(cursor.lastrowid), "通知通道已添加"
+
+
+def delete_notification_target_record(conn: sqlite3.Connection, target_id: int) -> tuple[bool, int]:
+    timestamp = now_str()
+    reassigned = conn.execute(
+        """
+        UPDATE monitors
+        SET notification_target_id = NULL, updated_at = ?
+        WHERE notification_target_id = ?
+        """,
+        (timestamp, target_id),
+    ).rowcount
+    deleted = conn.execute(
+        "DELETE FROM notification_targets WHERE id = ?",
+        (target_id,),
+    ).rowcount
+    return bool(deleted), int(reassigned or 0)
 
 
 def resolve_monitor_notification_settings(
@@ -893,7 +919,9 @@ def create_app() -> Flask:
             notification_targets = get_notification_targets(conn)
             monitors = conn.execute(
                 """
-                SELECT monitors.*, notification_targets.name AS notification_target_name
+                SELECT monitors.*,
+                       notification_targets.name AS notification_target_name,
+                       notification_targets.enabled AS notification_target_enabled
                 FROM monitors
                 LEFT JOIN notification_targets ON notification_targets.id = monitors.notification_target_id
                 ORDER BY monitors.id DESC
@@ -988,15 +1016,14 @@ def create_app() -> Flask:
     @app.post("/notification-targets/<int:target_id>/delete")
     def delete_notification_target(target_id: int) -> Any:
         with DB_LOCK, connect_db() as conn:
-            using_count = conn.execute(
-                "SELECT COUNT(*) FROM monitors WHERE notification_target_id = ?",
-                (target_id,),
-            ).fetchone()[0]
-            if using_count:
-                flash("仍有监控项正在使用这个通知通道，请先切换监控项的通知目标", "error")
-                return redirect(url_for("index", target_edit=target_id))
-            conn.execute("DELETE FROM notification_targets WHERE id = ?", (target_id,))
-        flash("通知通道已删除", "success")
+            deleted, reassigned = delete_notification_target_record(conn, target_id)
+        if not deleted:
+            flash("通知通道不存在", "error")
+            return redirect(url_for("index"))
+        if reassigned:
+            flash(f"通知通道已删除，{reassigned} 个监控项已回退到默认 Telegram", "success")
+        else:
+            flash("通知通道已删除", "success")
         return redirect(url_for("index"))
 
     @app.post("/monitors")

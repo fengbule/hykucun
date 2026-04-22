@@ -3,6 +3,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -26,10 +27,14 @@ class NotificationTargetTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    @contextmanager
     def connect(self):
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
-        return conn
+        try:
+            yield conn
+        finally:
+            conn.close()
 
     def test_init_db_creates_notification_target_schema(self):
         with self.connect() as conn:
@@ -81,6 +86,40 @@ class NotificationTargetTests(unittest.TestCase):
         self.assertEqual(settings["telegram_chat_id"], "@default")
         self.assertEqual(settings["telegram_message_thread_id"], "8")
         self.assertTrue(meta["is_default"])
+
+    def test_delete_notification_target_reassigns_monitors_to_default(self):
+        with self.connect() as conn:
+            target_id, _ = app.save_notification_target(conn, None, {
+                "name": "备用机器人",
+                "bot_token": "custom-token",
+                "chat_id": "@backup",
+                "message_thread_id": "",
+                "enabled": "on",
+            })
+            timestamp = app.now_str()
+            conn.execute(
+                """
+                INSERT INTO monitors (
+                    name, url, enabled, interval_seconds, aff_template,
+                    request_backend, browser_wait_seconds, cookie_header,
+                    product_selector, title_selector, stock_selector, price_selector,
+                    button_selector, link_selector, stock_regex, in_stock_words,
+                    out_of_stock_words, title_filter, notification_target_id,
+                    created_at, updated_at
+                ) VALUES (?, ?, 1, 60, '', 'requests', 8, '', '.product-card', 'h5',
+                    '.stock-info', '.pricing-info', '.buy-now-button', 'a[href]',
+                    '库存\\s*[:：]?\\s*(\\d+)', 'Available', 'Sold Out', '',
+                    ?, ?, ?)
+                """,
+                ("测试监控", "https://example.com", target_id, timestamp, timestamp),
+            )
+
+            deleted, reassigned = app.delete_notification_target_record(conn, target_id)
+            row = conn.execute("SELECT notification_target_id FROM monitors").fetchone()
+
+        self.assertTrue(deleted)
+        self.assertEqual(reassigned, 1)
+        self.assertIsNone(row["notification_target_id"])
 
     @patch("app.requests.post")
     def test_send_telegram_text_uses_selected_settings(self, mock_post):
