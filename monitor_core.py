@@ -31,6 +31,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "aff_template": "",
 }
 
+RESTOCK_STOCK_DELTA_THRESHOLD = 3
+
 REQUEST_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
@@ -492,7 +494,9 @@ def fetch_products(config: dict[str, Any], timeout: int = 15) -> list[Product]:
 
 
 def find_restocked_products(
-    products: list[Product], previous_products: dict[str, dict[str, Any]]
+    products: list[Product],
+    previous_products: dict[str, dict[str, Any]],
+    alert_untracked_available_products: bool = False,
 ) -> list[Product]:
     restocked: list[Product] = []
     for product in products:
@@ -501,11 +505,37 @@ def find_restocked_products(
 
         previous = find_previous_product_state(product, previous_products)
         if not previous:
+            if (
+                alert_untracked_available_products
+                or product.stock is None
+                or stock_reached_delta_threshold(product.stock)
+            ):
+                restocked.append(product)
             continue
 
-        if not previous.get("available") and not previous.get("restock_notified"):
+        was_restocked = not previous.get("available") and not previous.get("restock_notified")
+        stock_increased = bool(previous.get("available")) and stock_increased_by_delta(
+            product.stock, previous.get("stock")
+        )
+        if was_restocked or stock_increased:
             restocked.append(product)
     return restocked
+
+
+def stock_reached_delta_threshold(stock: Any) -> bool:
+    try:
+        return int(stock) >= RESTOCK_STOCK_DELTA_THRESHOLD
+    except (TypeError, ValueError):
+        return False
+
+
+def stock_increased_by_delta(current_stock: Any, previous_stock: Any) -> bool:
+    try:
+        current = int(current_stock)
+        previous = int(previous_stock)
+    except (TypeError, ValueError):
+        return False
+    return current - previous >= RESTOCK_STOCK_DELTA_THRESHOLD
 
 
 def find_previous_product_state(

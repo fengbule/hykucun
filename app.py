@@ -731,7 +731,11 @@ def check_monitor_once(monitor_id: int) -> tuple[bool, str]:
     try:
         products = fetch_products(config)
         products = [product for product in products if title_matches(product, title_filter)]
-        restocked = find_restocked_products(products, previous)
+        restocked = find_restocked_products(
+            products,
+            previous,
+            alert_untracked_available_products=row["last_status"] == "no_products",
+        )
         telegram_edits = telegram_products_to_edit(products, previous, restocked, settings, config["name"])
         available_count = sum(1 for product in products if product.available)
         if products:
@@ -767,7 +771,7 @@ def check_monitor_once(monitor_id: int) -> tuple[bool, str]:
         if status in {"no_products", "cookie_required", "cookie_expiring", "cookie_expired"}:
             log_event(conn, monitor_id, "warning", error)
             return False, error
-        message = f"检测 {len(products)} 个商品，可购买 {available_count} 个，新补货 {len(restocked)} 个"
+        message = f"检测 {len(products)} 个商品，可购买 {available_count} 个，新补货/库存增加 {len(restocked)} 个"
         log_event(conn, monitor_id, "info", f"{message}，通知通道：{target_meta['display_label']}")
 
     sent = 0
