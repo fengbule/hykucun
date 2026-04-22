@@ -27,9 +27,8 @@ from monitor_core import (
     fetch_products,
     find_previous_product_state,
     find_restocked_products,
+    telegram_product_card,
 )
-from monitor_core import telegram_product_card
-
 
 DB_LOCK = threading.Lock()
 SCHEDULER_STARTED = False
@@ -37,6 +36,7 @@ INSECURE_SECRET_KEYS = {"change-this-secret"}
 INSECURE_WEBUI_PASSWORDS = {"change-this-password"}
 MIN_INTERVAL_SECONDS = 1
 DEFAULT_SCHEDULER_TICK_SECONDS = 1.0
+DEFAULT_NOTIFICATION_TARGET_NAME = "默认 Telegram"
 
 
 def now_str() -> str:
@@ -77,13 +77,32 @@ def connect_db() -> sqlite3.Connection:
     return conn
 
 
+def ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, definition: str) -> None:
+    columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table_name})")}
+    if column_name not in columns:
+        conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
+
+
 def init_db() -> None:
     with DB_LOCK, connect_db() as conn:
         conn.executescript(
             """
+            PRAGMA foreign_keys = ON;
+
             CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS notification_targets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                bot_token TEXT NOT NULL DEFAULT '',
+                chat_id TEXT NOT NULL DEFAULT '',
+                message_thread_id TEXT NOT NULL DEFAULT '',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS monitors (
@@ -106,11 +125,13 @@ def init_db() -> None:
                 in_stock_words TEXT NOT NULL DEFAULT '立即购买,加入购物车,购买,开通,下单,Order Now,Buy Now,Available,Configure',
                 out_of_stock_words TEXT NOT NULL DEFAULT '产品已售罄,已售罄,售罄,缺货,无货,暂无库存,Out of Stock,Sold Out,Unavailable',
                 title_filter TEXT NOT NULL DEFAULT '',
+                notification_target_id INTEGER,
                 last_checked_at TEXT,
                 last_status TEXT NOT NULL DEFAULT 'pending',
                 last_error TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (notification_target_id) REFERENCES notification_targets(id) ON DELETE SET NULL
             );
 
             CREATE TABLE IF NOT EXISTS products (
@@ -146,6 +167,7 @@ def init_db() -> None:
         ensure_column(conn, "monitors", "browser_wait_seconds", "INTEGER NOT NULL DEFAULT 8")
         ensure_column(conn, "monitors", "cookie_header", "TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "monitors", "title_filter", "TEXT NOT NULL DEFAULT ''")
+        ensure_column(conn, "monitors", "notification_target_id", "INTEGER")
         ensure_column(conn, "products", "unavailable_since", "TEXT")
         ensure_column(conn, "products", "restock_notified", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "products", "telegram_chat_id", "TEXT NOT NULL DEFAULT ''")
@@ -167,8 +189,9 @@ def insert_default_monitor(conn: sqlite3.Connection) -> None:
             request_backend, browser_wait_seconds, cookie_header,
             product_selector, title_selector, stock_selector, price_selector,
             button_selector, link_selector, stock_regex, in_stock_words,
-            out_of_stock_words, created_at, updated_at
-        ) VALUES (?, ?, 1, 60, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            out_of_stock_words, title_filter, notification_target_id,
+            created_at, updated_at
+        ) VALUES (?, ?, 1, 60, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', NULL, ?, ?)
         """,
         (
             values["name"],
@@ -192,22 +215,12 @@ def insert_default_monitor(conn: sqlite3.Connection) -> None:
     )
 
 
-def ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, definition: str) -> None:
-    columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table_name})")}
-    if column_name not in columns:
-        conn.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
-
-
 def get_settings(conn: sqlite3.Connection) -> dict[str, str]:
     rows = conn.execute("SELECT key, value FROM settings").fetchall()
     settings = {row["key"]: row["value"] for row in rows}
     return {
-        "telegram_bot_token": settings.get(
-            "telegram_bot_token", os.getenv("TELEGRAM_BOT_TOKEN", "")
-        ),
-        "telegram_chat_id": settings.get(
-            "telegram_chat_id", os.getenv("TELEGRAM_CHAT_ID", "")
-        ),
+        "telegram_bot_token": settings.get("telegram_bot_token", os.getenv("TELEGRAM_BOT_TOKEN", "")),
+        "telegram_chat_id": settings.get("telegram_chat_id", os.getenv("TELEGRAM_CHAT_ID", "")),
         "telegram_message_thread_id": settings.get(
             "telegram_message_thread_id", os.getenv("TELEGRAM_MESSAGE_THREAD_ID", "")
         ),
@@ -223,6 +236,104 @@ def save_settings(conn: sqlite3.Connection, form: dict[str, str]) -> None:
             """,
             (key, form.get(key, "").strip()),
         )
+
+
+def default_notification_target(settings: dict[str, str]) -> dict[str, Any]:
+    return {
+        "id": None,
+        "name": DEFAULT_NOTIFICATION_TARGET_NAME,
+        "bot_token": settings.get("telegram_bot_token", ""),
+        "chat_id": settings.get("telegram_chat_id", ""),
+        "message_thread_id": settings.get("telegram_message_thread_id", ""),
+        "enabled": 1,
+        "is_default": True,
+        "display_label": f"{DEFAULT_NOTIFICATION_TARGET_NAME}（全局）",
+    }
+
+
+def get_notification_targets(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM notification_targets ORDER BY enabled DESC, id ASC"
+    ).fetchall()
+
+
+def get_notification_target(conn: sqlite3.Connection, target_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM notification_targets WHERE id = ?",
+        (target_id,),
+    ).fetchone()
+
+
+def normalize_notification_target_id(raw_value: str | None) -> int | None:
+    value = (raw_value or "").strip()
+    if not value:
+        return None
+    try:
+        target_id = int(value)
+    except ValueError:
+        return None
+    return target_id if target_id > 0 else None
+
+
+def save_notification_target(conn: sqlite3.Connection, target_id: int | None, form: dict[str, str]) -> tuple[int, str]:
+    timestamp = now_str()
+    name = form.get("name", "").strip() or "未命名通道"
+    bot_token = form.get("bot_token", "").strip()
+    chat_id = form.get("chat_id", "").strip()
+    thread_id = form.get("message_thread_id", "").strip()
+    enabled = 1 if form.get("enabled") == "on" else 0
+
+    if target_id:
+        conn.execute(
+            """
+            UPDATE notification_targets
+            SET name = ?, bot_token = ?, chat_id = ?, message_thread_id = ?, enabled = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (name, bot_token, chat_id, thread_id, enabled, timestamp, target_id),
+        )
+        return target_id, "通知通道已更新"
+
+    cursor = conn.execute(
+        """
+        INSERT INTO notification_targets (
+            name, bot_token, chat_id, message_thread_id, enabled, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (name, bot_token, chat_id, thread_id, enabled, timestamp, timestamp),
+    )
+    return int(cursor.lastrowid), "通知通道已添加"
+
+
+def resolve_monitor_notification_settings(
+    conn: sqlite3.Connection,
+    monitor_row: sqlite3.Row | dict[str, Any],
+) -> tuple[dict[str, str], dict[str, Any]]:
+    settings = get_settings(conn)
+    selected_id = None
+    try:
+        selected_id = monitor_row["notification_target_id"]
+    except (TypeError, KeyError, IndexError):
+        selected_id = monitor_row.get("notification_target_id") if isinstance(monitor_row, dict) else None
+
+    if selected_id:
+        target = get_notification_target(conn, int(selected_id))
+        if target and target["enabled"]:
+            return (
+                {
+                    "telegram_bot_token": target["bot_token"],
+                    "telegram_chat_id": target["chat_id"],
+                    "telegram_message_thread_id": target["message_thread_id"],
+                },
+                {
+                    "id": int(target["id"]),
+                    "name": target["name"],
+                    "is_default": False,
+                    "display_label": target["name"],
+                },
+            )
+    default_target = default_notification_target(settings)
+    return settings, default_target
 
 
 def monitor_config(row: sqlite3.Row) -> dict[str, Any]:
@@ -269,11 +380,7 @@ def title_matches(product: Product, title_filter: str) -> bool:
     return False
 
 
-def classify_monitor_failure(
-    error_text: str,
-    config: dict[str, Any],
-    previous_status: str | None,
-) -> tuple[str, str]:
+def classify_monitor_failure(error_text: str, config: dict[str, Any], previous_status: str | None) -> tuple[str, str]:
     lowered = (error_text or "").lower()
     has_cookie = bool(str(config.get("cookie_header") or "").strip())
     challenge_hit = any(
@@ -285,22 +392,18 @@ def classify_monitor_failure(
             "just a moment",
         )
     )
-
     if not challenge_hit:
         return "error", error_text
-
     if not has_cookie:
         return (
             "cookie_required",
             "目标站点启用了安全验证。请切换 Browser 模式并配置有效 Cookie（如 cf_clearance）。",
         )
-
     if previous_status == "ok":
         return (
             "cookie_expiring",
             "检测到安全验证，Cookie 可能即将失效，请尽快更新 cf_clearance。",
         )
-
     return (
         "cookie_expired",
         "检测到安全验证，Cookie 可能已失效，请更新 Cookie 后重试。",
@@ -380,21 +483,14 @@ def upsert_products(conn: sqlite3.Connection, monitor_id: int, products: list[Pr
         previous_key = previous.get("product_key") if previous else None
         if previous_key and previous_key != product.key:
             conn.execute(
-                """
-                DELETE FROM products
-                WHERE monitor_id = ?
-                  AND product_key = ?
-                """,
+                "DELETE FROM products WHERE monitor_id = ? AND product_key = ?",
                 (monitor_id, previous_key),
             )
-
         if product.purchase_url:
             conn.execute(
                 """
                 DELETE FROM products
-                WHERE monitor_id = ?
-                  AND product_key <> ?
-                  AND purchase_url = ?
+                WHERE monitor_id = ? AND product_key <> ? AND purchase_url = ?
                 """,
                 (monitor_id, product.key, product.purchase_url),
             )
@@ -440,9 +536,7 @@ def upsert_products(conn: sqlite3.Connection, monitor_id: int, products: list[Pr
         )
 
 
-def log_event(
-    conn: sqlite3.Connection, monitor_id: int | None, level: str, message: str
-) -> None:
+def log_event(conn: sqlite3.Connection, monitor_id: int | None, level: str, message: str) -> None:
     conn.execute(
         "INSERT INTO events (monitor_id, level, message, created_at) VALUES (?, ?, ?, ?)",
         (monitor_id, level, message[:1000], now_str()),
@@ -464,11 +558,8 @@ def update_product_telegram_message(
     conn.execute(
         """
         UPDATE products
-        SET telegram_chat_id = ?,
-            telegram_message_id = ?,
-            telegram_text_hash = ?
-        WHERE monitor_id = ?
-          AND product_key = ?
+        SET telegram_chat_id = ?, telegram_message_id = ?, telegram_text_hash = ?
+        WHERE monitor_id = ? AND product_key = ?
         """,
         (chat_id, message_id, text_hash, monitor_id, product.key),
     )
@@ -497,28 +588,41 @@ def telegram_products_to_edit(
     chat_id = settings.get("telegram_chat_id", "").strip()
     if not chat_id:
         return []
-
     restocked_keys = {product.key for product in restocked}
     edits: list[tuple[Product, dict[str, Any], str]] = []
     for product in products:
         if product.key in restocked_keys:
             continue
-
         previous = find_previous_product_state(product, previous_products)
         if not previous or not previous.get("telegram_message_id"):
             continue
-
         previous_chat_id = str(previous.get("telegram_chat_id") or "")
         if previous_chat_id and previous_chat_id != chat_id:
             continue
-
         text = telegram_product_card(monitor_name, product)
         if previous.get("telegram_text_hash") == telegram_text_hash(text):
             continue
-
         if product_display_changed(product, previous):
             edits.append((product, previous, text))
     return edits
+
+
+def _telegram_payload(settings: dict[str, str], text: str) -> tuple[dict[str, Any], str, str]:
+    bot_token = settings.get("telegram_bot_token", "").strip()
+    chat_id = settings.get("telegram_chat_id", "").strip()
+    payload: dict[str, Any] = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": False,
+    }
+    thread_id = settings.get("telegram_message_thread_id", "").strip()
+    if thread_id:
+        try:
+            payload["message_thread_id"] = int(thread_id)
+        except ValueError:
+            pass
+    return payload, bot_token, chat_id
 
 
 def send_telegram_product(
@@ -527,30 +631,14 @@ def send_telegram_product(
     product: Product,
     stock_transition: str | None = None,
 ) -> tuple[bool, str, int | None]:
-    bot_token = settings.get("telegram_bot_token", "").strip()
-    chat_id = settings.get("telegram_chat_id", "").strip()
+    text = telegram_product_card(monitor_name, product, stock_transition)
+    payload, bot_token, chat_id = _telegram_payload(settings, text)
     if not bot_token or not chat_id:
         return False, "Telegram token 或 chat id 未配置", None
-
-    text = telegram_product_card(monitor_name, product, stock_transition)
-    payload: dict[str, Any] = {
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": False,
-    }
     if product.purchase_url.startswith(("http://", "https://")):
         payload["reply_markup"] = {
             "inline_keyboard": [[{"text": "打开购买链接", "url": product.purchase_url}]]
         }
-
-    thread_id = settings.get("telegram_message_thread_id", "").strip()
-    if thread_id:
-        try:
-            payload["message_thread_id"] = int(thread_id)
-        except ValueError:
-            pass
-
     response = requests.post(
         f"https://api.telegram.org/bot{bot_token}/sendMessage",
         json=payload,
@@ -569,23 +657,14 @@ def edit_telegram_product(
     message_id: int,
     text: str,
 ) -> tuple[bool, str]:
-    bot_token = settings.get("telegram_bot_token", "").strip()
-    chat_id = settings.get("telegram_chat_id", "").strip()
+    payload, bot_token, chat_id = _telegram_payload(settings, text)
     if not bot_token or not chat_id:
         return False, "Telegram token 或 chat id 未配置"
-
-    payload: dict[str, Any] = {
-        "chat_id": chat_id,
-        "message_id": int(message_id),
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": False,
-    }
+    payload["message_id"] = int(message_id)
     if product.purchase_url.startswith(("http://", "https://")):
         payload["reply_markup"] = {
             "inline_keyboard": [[{"text": "打开购买链接", "url": product.purchase_url}]]
         }
-
     response = requests.post(
         f"https://api.telegram.org/bot{bot_token}/editMessageText",
         json=payload,
@@ -599,22 +678,10 @@ def edit_telegram_product(
 
 
 def send_telegram_text(settings: dict[str, str], text: str) -> tuple[bool, str]:
-    bot_token = settings.get("telegram_bot_token", "").strip()
-    chat_id = settings.get("telegram_chat_id", "").strip()
+    payload, bot_token, chat_id = _telegram_payload(settings, text)
     if not bot_token or not chat_id:
         return False, "Telegram token 或 chat id 未配置"
-
-    payload: dict[str, Any] = {
-        "chat_id": chat_id,
-        "text": text,
-        "disable_web_page_preview": True,
-    }
-    thread_id = settings.get("telegram_message_thread_id", "").strip()
-    if thread_id:
-        try:
-            payload["message_thread_id"] = int(thread_id)
-        except ValueError:
-            pass
+    payload["disable_web_page_preview"] = True
     response = requests.post(
         f"https://api.telegram.org/bot{bot_token}/sendMessage",
         json=payload,
@@ -633,15 +700,13 @@ def check_monitor_once(monitor_id: int) -> tuple[bool, str]:
         config = monitor_config(row)
         title_filter = row["title_filter"]
         previous = previous_product_state(conn, monitor_id)
-        settings = get_settings(conn)
+        settings, target_meta = resolve_monitor_notification_settings(conn, row)
 
     try:
         products = fetch_products(config)
         products = [product for product in products if title_matches(product, title_filter)]
         restocked = find_restocked_products(products, previous)
-        telegram_edits = telegram_products_to_edit(
-            products, previous, restocked, settings, config["name"]
-        )
+        telegram_edits = telegram_products_to_edit(products, previous, restocked, settings, config["name"])
         available_count = sum(1 for product in products if product.available)
         if products:
             status = "ok"
@@ -662,7 +727,6 @@ def check_monitor_once(monitor_id: int) -> tuple[bool, str]:
     with DB_LOCK, connect_db() as conn:
         if products:
             upsert_products(conn, monitor_id, products)
-
         conn.execute(
             """
             UPDATE monitors
@@ -671,22 +735,14 @@ def check_monitor_once(monitor_id: int) -> tuple[bool, str]:
             """,
             (now_str(), status, error, now_str(), monitor_id),
         )
-
         if status == "error":
             log_event(conn, monitor_id, "error", error)
             return False, error
-
-        if status in {
-            "no_products",
-            "cookie_required",
-            "cookie_expiring",
-            "cookie_expired",
-        }:
+        if status in {"no_products", "cookie_required", "cookie_expiring", "cookie_expired"}:
             log_event(conn, monitor_id, "warning", error)
             return False, error
-
         message = f"检测 {len(products)} 个商品，可购买 {available_count} 个，新补货 {len(restocked)} 个"
-        log_event(conn, monitor_id, "info", message)
+        log_event(conn, monitor_id, "info", f"{message}，通知通道：{target_meta['display_label']}")
 
     sent = 0
     failed = 0
@@ -703,14 +759,8 @@ def check_monitor_once(monitor_id: int) -> tuple[bool, str]:
             if unavailable_since:
                 elapsed = int((now - unavailable_since).total_seconds())
                 stock_transition = f"{stock_transition}（{format_duration(elapsed)}）"
-
         sent_text = telegram_product_card(config["name"], product, stock_transition)
-        ok, telegram_message, message_id = send_telegram_product(
-            settings,
-            config["name"],
-            product,
-            stock_transition,
-        )
+        ok, telegram_message, message_id = send_telegram_product(settings, config["name"], product, stock_transition)
         sent += 1 if ok else 0
         failed += 0 if ok else 1
         with DB_LOCK, connect_db() as conn:
@@ -724,7 +774,7 @@ def check_monitor_once(monitor_id: int) -> tuple[bool, str]:
                     int(message_id),
                     telegram_text_hash(sent_text),
                 )
-            log_event(conn, monitor_id, level, f"{product.title}: {telegram_message}")
+            log_event(conn, monitor_id, level, f"{product.title}: {telegram_message}（{target_meta['display_label']}）")
 
     updated = 0
     update_failed = 0
@@ -732,13 +782,7 @@ def check_monitor_once(monitor_id: int) -> tuple[bool, str]:
         message_id = previous_item.get("telegram_message_id")
         if not message_id:
             continue
-
-        ok, telegram_message = edit_telegram_product(
-            settings,
-            product,
-            int(message_id),
-            text,
-        )
+        ok, telegram_message = edit_telegram_product(settings, product, int(message_id), text)
         updated += 1 if ok else 0
         update_failed += 0 if ok else 1
         with DB_LOCK, connect_db() as conn:
@@ -752,7 +796,7 @@ def check_monitor_once(monitor_id: int) -> tuple[bool, str]:
                     int(message_id),
                     telegram_text_hash(text),
                 )
-            log_event(conn, monitor_id, level, f"{product.title}: {telegram_message}")
+            log_event(conn, monitor_id, level, f"{product.title}: {telegram_message}（{target_meta['display_label']}）")
 
     suffix = ""
     if restocked:
@@ -805,17 +849,12 @@ def validate_runtime_secrets() -> None:
     webui_password = os.getenv("WEBUI_PASSWORD", "")
     if secret_key in INSECURE_SECRET_KEYS:
         raise RuntimeError(
-            "SECRET_KEY is using a public placeholder. Set a unique random value "
-            "in .env. If .env already looks correct, remove stale SECRET_KEY "
-            "entries from docker-compose.override.yml and verify with "
-            "`docker compose config`."
+            "SECRET_KEY is using a public placeholder. Set a unique random value in .env. "
+            "If .env already looks correct, remove stale SECRET_KEY entries from docker-compose.override.yml."
         )
     if webui_password in INSECURE_WEBUI_PASSWORDS:
         raise RuntimeError(
-            "WEBUI_PASSWORD is using a public placeholder. Set a private password "
-            "in .env, or leave it empty only on a trusted private network. If .env "
-            "already looks correct, remove stale WEBUI_PASSWORD entries from "
-            "docker-compose.override.yml and verify with `docker compose config`."
+            "WEBUI_PASSWORD is using a public placeholder. Set a private password in .env."
         )
 
 
@@ -828,8 +867,7 @@ def create_app() -> Flask:
 
     global SCHEDULER_STARTED
     if not SCHEDULER_STARTED and os.getenv("DISABLE_SCHEDULER", "0") != "1":
-        thread = threading.Thread(target=scheduler_loop, daemon=True)
-        thread.start()
+        threading.Thread(target=scheduler_loop, daemon=True).start()
         SCHEDULER_STARTED = True
 
     @app.route("/login", methods=["GET", "POST"])
@@ -849,9 +887,18 @@ def create_app() -> Flask:
     @app.route("/")
     def index() -> Any:
         edit_id = request.args.get("edit", type=int)
+        target_edit_id = request.args.get("target_edit", type=int)
         with DB_LOCK, connect_db() as conn:
-            monitors = conn.execute("SELECT * FROM monitors ORDER BY id DESC").fetchall()
             settings = get_settings(conn)
+            notification_targets = get_notification_targets(conn)
+            monitors = conn.execute(
+                """
+                SELECT monitors.*, notification_targets.name AS notification_target_name
+                FROM monitors
+                LEFT JOIN notification_targets ON notification_targets.id = monitors.notification_target_id
+                ORDER BY monitors.id DESC
+                """
+            ).fetchall()
             events = conn.execute(
                 """
                 SELECT events.*, monitors.name AS monitor_name
@@ -872,14 +919,17 @@ def create_app() -> Flask:
                     """,
                     (monitor["id"],),
                 ).fetchall()
-            edit_monitor = None
-            if edit_id:
-                edit_monitor = conn.execute(
-                    "SELECT * FROM monitors WHERE id = ?",
-                    (edit_id,),
-                ).fetchone()
+            edit_monitor = conn.execute("SELECT * FROM monitors WHERE id = ?", (edit_id,)).fetchone() if edit_id else None
+            edit_target = get_notification_target(conn, target_edit_id) if target_edit_id else None
 
         form_monitor = edit_monitor or DEFAULT_CONFIG
+        form_target = edit_target or {
+            "name": "",
+            "bot_token": "",
+            "chat_id": "",
+            "message_thread_id": "",
+            "enabled": 1,
+        }
         return render_template(
             "index.html",
             monitors=monitors,
@@ -888,6 +938,10 @@ def create_app() -> Flask:
             products_by_monitor=products_by_monitor,
             edit_monitor=edit_monitor,
             form_monitor=form_monitor,
+            notification_targets=notification_targets,
+            edit_target=edit_target,
+            form_target=form_target,
+            default_target=default_notification_target(settings),
             default_config=DEFAULT_CONFIG,
             auth_enabled=bool(os.getenv("WEBUI_PASSWORD", "")),
         )
@@ -896,15 +950,53 @@ def create_app() -> Flask:
     def update_settings() -> Any:
         with DB_LOCK, connect_db() as conn:
             save_settings(conn, request.form)
-        flash("Telegram 设置已保存", "success")
+        flash("默认 Telegram 设置已保存", "success")
         return redirect(url_for("index"))
 
     @app.post("/settings/test")
     def test_telegram() -> Any:
         with DB_LOCK, connect_db() as conn:
             settings = get_settings(conn)
-        ok, message = send_telegram_text(settings, f"库存监控 WebUI 测试通知：{now_str()}")
+        ok, message = send_telegram_text(settings, f"库存监控 WebUI 默认通道测试通知：{now_str()}")
         flash(message, "success" if ok else "error")
+        return redirect(url_for("index"))
+
+    @app.post("/notification-targets")
+    def upsert_notification_target() -> Any:
+        target_id = request.form.get("id", type=int)
+        with DB_LOCK, connect_db() as conn:
+            _, message = save_notification_target(conn, target_id, request.form)
+        flash(message, "success")
+        return redirect(url_for("index"))
+
+    @app.post("/notification-targets/<int:target_id>/test")
+    def test_notification_target(target_id: int) -> Any:
+        with DB_LOCK, connect_db() as conn:
+            row = get_notification_target(conn, target_id)
+        if not row:
+            flash("通知通道不存在", "error")
+            return redirect(url_for("index"))
+        settings = {
+            "telegram_bot_token": row["bot_token"],
+            "telegram_chat_id": row["chat_id"],
+            "telegram_message_thread_id": row["message_thread_id"],
+        }
+        ok, message = send_telegram_text(settings, f"库存监控 WebUI 通道测试通知：{row['name']} {now_str()}")
+        flash(message, "success" if ok else "error")
+        return redirect(url_for("index", target_edit=target_id))
+
+    @app.post("/notification-targets/<int:target_id>/delete")
+    def delete_notification_target(target_id: int) -> Any:
+        with DB_LOCK, connect_db() as conn:
+            using_count = conn.execute(
+                "SELECT COUNT(*) FROM monitors WHERE notification_target_id = ?",
+                (target_id,),
+            ).fetchone()[0]
+            if using_count:
+                flash("仍有监控项正在使用这个通知通道，请先切换监控项的通知目标", "error")
+                return redirect(url_for("index", target_edit=target_id))
+            conn.execute("DELETE FROM notification_targets WHERE id = ?", (target_id,))
+        flash("通知通道已删除", "success")
         return redirect(url_for("index"))
 
     @app.post("/monitors")
@@ -919,70 +1011,51 @@ def create_app() -> Flask:
             "request_backend": request.form.get("request_backend", "requests").strip()
             if request.form.get("request_backend") in {"requests", "browser"}
             else "requests",
-            "browser_wait_seconds": max(
-                0, request.form.get("browser_wait_seconds", type=int) or 0
-            ),
+            "browser_wait_seconds": max(0, request.form.get("browser_wait_seconds", type=int) or 0),
             "cookie_header": request.form.get("cookie_header", "").strip(),
             "aff_template": request.form.get("aff_template", "").strip(),
-            "product_selector": request.form.get("product_selector", "").strip()
-            or DEFAULT_CONFIG["product_selector"],
-            "title_selector": request.form.get("title_selector", "").strip()
-            or DEFAULT_CONFIG["title_selector"],
-            "stock_selector": request.form.get("stock_selector", "").strip()
-            or DEFAULT_CONFIG["stock_selector"],
-            "price_selector": request.form.get("price_selector", "").strip()
-            or DEFAULT_CONFIG["price_selector"],
-            "button_selector": request.form.get("button_selector", "").strip()
-            or DEFAULT_CONFIG["button_selector"],
-            "link_selector": request.form.get("link_selector", "").strip()
-            or DEFAULT_CONFIG["link_selector"],
-            "stock_regex": request.form.get("stock_regex", "").strip()
-            or DEFAULT_CONFIG["stock_regex"],
-            "in_stock_words": request.form.get("in_stock_words", "").strip()
-            or DEFAULT_CONFIG["in_stock_words"],
-            "out_of_stock_words": request.form.get("out_of_stock_words", "").strip()
-            or DEFAULT_CONFIG["out_of_stock_words"],
+            "product_selector": request.form.get("product_selector", "").strip() or DEFAULT_CONFIG["product_selector"],
+            "title_selector": request.form.get("title_selector", "").strip() or DEFAULT_CONFIG["title_selector"],
+            "stock_selector": request.form.get("stock_selector", "").strip() or DEFAULT_CONFIG["stock_selector"],
+            "price_selector": request.form.get("price_selector", "").strip() or DEFAULT_CONFIG["price_selector"],
+            "button_selector": request.form.get("button_selector", "").strip() or DEFAULT_CONFIG["button_selector"],
+            "link_selector": request.form.get("link_selector", "").strip() or DEFAULT_CONFIG["link_selector"],
+            "stock_regex": request.form.get("stock_regex", "").strip() or DEFAULT_CONFIG["stock_regex"],
+            "in_stock_words": request.form.get("in_stock_words", "").strip() or DEFAULT_CONFIG["in_stock_words"],
+            "out_of_stock_words": request.form.get("out_of_stock_words", "").strip() or DEFAULT_CONFIG["out_of_stock_words"],
             "title_filter": request.form.get("title_filter", "").strip(),
+            "notification_target_id": normalize_notification_target_id(request.form.get("notification_target_id")),
         }
         if not payload["url"]:
             flash("URL 不能为空", "error")
             return redirect(url_for("index", edit=monitor_id) if monitor_id else url_for("index"))
 
         with DB_LOCK, connect_db() as conn:
+            if payload["notification_target_id"]:
+                target = get_notification_target(conn, payload["notification_target_id"])
+                if not target:
+                    flash("选择的通知通道不存在", "error")
+                    return redirect(url_for("index", edit=monitor_id) if monitor_id else url_for("index"))
             if monitor_id:
                 conn.execute(
                     """
                     UPDATE monitors SET
                         name = ?, url = ?, enabled = ?, interval_seconds = ?,
-                        request_backend = ?, browser_wait_seconds = ?,
-                        cookie_header = ?,
-                        aff_template = ?, product_selector = ?, title_selector = ?,
-                        stock_selector = ?, price_selector = ?, button_selector = ?,
-                        link_selector = ?, stock_regex = ?, in_stock_words = ?,
-                        out_of_stock_words = ?, title_filter = ?, updated_at = ?
+                        request_backend = ?, browser_wait_seconds = ?, cookie_header = ?,
+                        aff_template = ?, product_selector = ?, title_selector = ?, stock_selector = ?,
+                        price_selector = ?, button_selector = ?, link_selector = ?, stock_regex = ?,
+                        in_stock_words = ?, out_of_stock_words = ?, title_filter = ?,
+                        notification_target_id = ?, updated_at = ?
                     WHERE id = ?
                     """,
                     (
-                        payload["name"],
-                        payload["url"],
-                        payload["enabled"],
-                        payload["interval_seconds"],
-                        payload["request_backend"],
-                        payload["browser_wait_seconds"],
-                        payload["cookie_header"],
-                        payload["aff_template"],
-                        payload["product_selector"],
-                        payload["title_selector"],
-                        payload["stock_selector"],
-                        payload["price_selector"],
-                        payload["button_selector"],
-                        payload["link_selector"],
-                        payload["stock_regex"],
-                        payload["in_stock_words"],
-                        payload["out_of_stock_words"],
-                        payload["title_filter"],
-                        timestamp,
-                        monitor_id,
+                        payload["name"], payload["url"], payload["enabled"], payload["interval_seconds"],
+                        payload["request_backend"], payload["browser_wait_seconds"], payload["cookie_header"],
+                        payload["aff_template"], payload["product_selector"], payload["title_selector"],
+                        payload["stock_selector"], payload["price_selector"], payload["button_selector"],
+                        payload["link_selector"], payload["stock_regex"], payload["in_stock_words"],
+                        payload["out_of_stock_words"], payload["title_filter"], payload["notification_target_id"],
+                        timestamp, monitor_id,
                     ),
                 )
                 flash("监控项已更新", "success")
@@ -990,35 +1063,22 @@ def create_app() -> Flask:
                 conn.execute(
                     """
                     INSERT INTO monitors (
-                        name, url, enabled, interval_seconds,
-                        request_backend, browser_wait_seconds, cookie_header, aff_template,
-                        product_selector, title_selector, stock_selector,
-                        price_selector, button_selector, link_selector,
-                        stock_regex, in_stock_words, out_of_stock_words,
-                        title_filter, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        name, url, enabled, interval_seconds, request_backend,
+                        browser_wait_seconds, cookie_header, aff_template,
+                        product_selector, title_selector, stock_selector, price_selector,
+                        button_selector, link_selector, stock_regex, in_stock_words,
+                        out_of_stock_words, title_filter, notification_target_id,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        payload["name"],
-                        payload["url"],
-                        payload["enabled"],
-                        payload["interval_seconds"],
-                        payload["request_backend"],
-                        payload["browser_wait_seconds"],
-                        payload["cookie_header"],
-                        payload["aff_template"],
-                        payload["product_selector"],
-                        payload["title_selector"],
-                        payload["stock_selector"],
-                        payload["price_selector"],
-                        payload["button_selector"],
-                        payload["link_selector"],
-                        payload["stock_regex"],
-                        payload["in_stock_words"],
-                        payload["out_of_stock_words"],
-                        payload["title_filter"],
-                        timestamp,
-                        timestamp,
+                        payload["name"], payload["url"], payload["enabled"], payload["interval_seconds"],
+                        payload["request_backend"], payload["browser_wait_seconds"], payload["cookie_header"],
+                        payload["aff_template"], payload["product_selector"], payload["title_selector"],
+                        payload["stock_selector"], payload["price_selector"], payload["button_selector"],
+                        payload["link_selector"], payload["stock_regex"], payload["in_stock_words"],
+                        payload["out_of_stock_words"], payload["title_filter"], payload["notification_target_id"],
+                        timestamp, timestamp,
                     ),
                 )
                 flash("监控项已添加", "success")
