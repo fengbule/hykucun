@@ -413,7 +413,11 @@ def filter_restocked_products(
     filtered: list[Product] = []
     for product in restocked:
         previous = find_previous_product_state(product, previous_products)
-        if not previous or not bool(previous.get("available")):
+        if (
+            not previous
+            or not bool(previous.get("available"))
+            or not bool(previous.get("restock_notified", True))
+        ):
             filtered.append(product)
     return filtered
 
@@ -493,8 +497,14 @@ def previous_product_state(conn: sqlite3.Connection, monitor_id: int) -> dict[st
     }
 
 
-def upsert_products(conn: sqlite3.Connection, monitor_id: int, products: list[Product]) -> None:
+def upsert_products(
+    conn: sqlite3.Connection,
+    monitor_id: int,
+    products: list[Product],
+    pending_notification_keys: set[str] | None = None,
+) -> None:
     timestamp = now_str()
+    pending_notification_keys = pending_notification_keys or set()
     existing_rows = conn.execute(
         """
         SELECT product_key, title, status, available, stock, price, purchase_url,
@@ -528,7 +538,12 @@ def upsert_products(conn: sqlite3.Connection, monitor_id: int, products: list[Pr
         previous = find_previous_product_state(product, existing)
         if product.available:
             unavailable_since = None
-            restock_notified = 1
+            if product.key in pending_notification_keys:
+                restock_notified = 0
+            elif previous:
+                restock_notified = 1 if bool(previous.get("restock_notified", True)) else 0
+            else:
+                restock_notified = 1
         elif previous and not bool(previous["available"]) and previous.get("unavailable_since"):
             unavailable_since = previous["unavailable_since"]
             restock_notified = 0
@@ -617,7 +632,7 @@ def update_product_telegram_message(
     conn.execute(
         """
         UPDATE products
-        SET telegram_chat_id = ?, telegram_message_id = ?, telegram_text_hash = ?
+        SET telegram_chat_id = ?, telegram_message_id = ?, telegram_text_hash = ?, restock_notified = 1
         WHERE monitor_id = ? AND product_key = ?
         """,
         (chat_id, message_id, text_hash, monitor_id, product.key),
@@ -767,6 +782,7 @@ def check_monitor_once(monitor_id: int) -> tuple[bool, str]:
         products = [product for product in products if title_matches(product, title_filter)]
         restocked_candidates = find_restocked_products(products, previous)
         restocked = filter_restocked_products(restocked_candidates, previous, notification_mode)
+        pending_notification_keys = {product.key for product in restocked}
         telegram_edits = telegram_products_to_edit(products, previous, restocked, settings, config["name"])
         available_count = sum(1 for product in products if product.available)
         if products:
@@ -781,13 +797,14 @@ def check_monitor_once(monitor_id: int) -> tuple[bool, str]:
     except Exception as exc:
         products = []
         restocked = []
+        pending_notification_keys = set()
         telegram_edits = []
         available_count = 0
         status, error = classify_monitor_failure(str(exc), config, row["last_status"])
 
     with DB_LOCK, connect_db() as conn:
         if products:
-            upsert_products(conn, monitor_id, products)
+            upsert_products(conn, monitor_id, products, pending_notification_keys)
         conn.execute(
             """
             UPDATE monitors
@@ -826,13 +843,13 @@ def check_monitor_once(monitor_id: int) -> tuple[bool, str]:
         failed += 0 if ok else 1
         with DB_LOCK, connect_db() as conn:
             level = "info" if ok else "warning"
-            if ok and message_id:
+            if ok:
                 update_product_telegram_message(
                     conn,
                     monitor_id,
                     product,
                     settings.get("telegram_chat_id", "").strip(),
-                    int(message_id),
+                    int(message_id) if message_id is not None else None,
                     telegram_text_hash(sent_text),
                 )
             log_event(conn, monitor_id, level, f"{product.title}: {telegram_message}（{target_meta['display_label']}）")

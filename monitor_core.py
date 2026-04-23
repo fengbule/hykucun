@@ -506,7 +506,11 @@ def find_restocked_products(
             restocked.append(product)
             continue
 
-        if not bool(previous.get("available")) or previous.get("stock") != product.stock:
+        if (
+            not bool(previous.get("restock_notified", True))
+            or not bool(previous.get("available"))
+            or previous.get("stock") != product.stock
+        ):
             restocked.append(product)
     return restocked
 

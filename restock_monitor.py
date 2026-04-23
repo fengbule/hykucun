@@ -7,7 +7,12 @@ import os
 import time
 from pathlib import Path
 
-from monitor_core import DEFAULT_CONFIG, fetch_products, find_restocked_products
+from monitor_core import (
+    DEFAULT_CONFIG,
+    fetch_products,
+    find_previous_product_state,
+    find_restocked_products,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -28,6 +33,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stock-regex", default=DEFAULT_CONFIG["stock_regex"])
     parser.add_argument("--in-stock-words", default=DEFAULT_CONFIG["in_stock_words"])
     parser.add_argument("--out-of-stock-words", default=DEFAULT_CONFIG["out_of_stock_words"])
+    parser.add_argument(
+        "--notification-mode",
+        choices=["restock_only", "realtime"],
+        default=DEFAULT_CONFIG.get("notification_mode", "restock_only"),
+    )
     parser.add_argument("--once", action="store_true")
     return parser.parse_args()
 
@@ -63,9 +73,29 @@ def args_to_config(args: argparse.Namespace) -> dict:
             "stock_regex": args.stock_regex,
             "in_stock_words": args.in_stock_words,
             "out_of_stock_words": args.out_of_stock_words,
+            "notification_mode": args.notification_mode,
         }
     )
     return config
+
+
+def filter_restocked_products(
+    restocked: list,
+    previous_products: dict,
+    notification_mode: str,
+) -> list:
+    if notification_mode == "realtime":
+        return restocked
+    filtered = []
+    for product in restocked:
+        previous = find_previous_product_state(product, previous_products)
+        if (
+            not previous
+            or not bool(previous.get("available"))
+            or not bool(previous.get("restock_notified", True))
+        ):
+            filtered.append(product)
+    return filtered
 
 
 def main() -> None:
@@ -76,7 +106,13 @@ def main() -> None:
     while True:
         state = load_state(state_file)
         products = fetch_products(config)
-        restocked = find_restocked_products(products, state.get("products", {}))
+        previous_products = state.get("products", {})
+        restocked_candidates = find_restocked_products(products, previous_products)
+        restocked = filter_restocked_products(
+            restocked_candidates,
+            previous_products,
+            config.get("notification_mode", DEFAULT_CONFIG.get("notification_mode", "restock_only")),
+        )
         current = {}
         for product in products:
             product_state = product.to_dict()

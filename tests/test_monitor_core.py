@@ -168,6 +168,22 @@ class ParseProductsTests(unittest.TestCase):
             ),
             [product],
         )
+        self.assertEqual(
+            find_restocked_products(
+                [product],
+                {
+                    product.key: {
+                        "available": True,
+                        "stock": 10,
+                        "title": product.title,
+                        "price": product.price,
+                        "purchase_url": product.purchase_url,
+                        "restock_notified": False,
+                    }
+                },
+            ),
+            [product],
+        )
 
 
 if __name__ == "__main__":
