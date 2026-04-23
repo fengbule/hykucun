@@ -90,24 +90,10 @@ class ParseProductsTests(unittest.TestCase):
 
         self.assertEqual(out_of_stock.key, in_stock.key)
 
-    def test_restock_alerts_for_new_untracked_product_when_stock_reaches_threshold(self) -> None:
-        low_stock_product = parse_products(self.whmcs_product_html("2 Available"), self.config())[0]
-        threshold_stock_product = parse_products(self.whmcs_product_html("3 Available"), self.config())[0]
-
-        self.assertEqual(find_restocked_products([low_stock_product], {}), [])
-        self.assertEqual(find_restocked_products([threshold_stock_product], {}), [threshold_stock_product])
-
-    def test_restock_alerts_for_untracked_available_product_after_blank_page(self) -> None:
+    def test_restock_alerts_for_new_untracked_available_product(self) -> None:
         product = parse_products(self.whmcs_product_html("2 Available"), self.config())[0]
 
-        self.assertEqual(
-            find_restocked_products(
-                [product],
-                {},
-                alert_untracked_available_products=True,
-            ),
-            [product],
-        )
+        self.assertEqual(find_restocked_products([product], {}), [product])
 
     def test_restock_alerts_for_new_untracked_product_with_unknown_stock(self) -> None:
         product = parse_products(self.whmcs_product_html("Available"), self.config())[0]
@@ -115,9 +101,25 @@ class ParseProductsTests(unittest.TestCase):
         self.assertIsNone(product.stock)
         self.assertEqual(find_restocked_products([product], {}), [product])
 
-    def test_restock_alert_when_previous_state_was_unavailable_or_stock_increases(self) -> None:
+    def test_restock_alert_when_previous_state_was_unavailable_or_stock_changes(self) -> None:
         product = parse_products(self.whmcs_product_html("10 Available"), self.config())[0]
 
+        self.assertEqual(
+            find_restocked_products(
+                [product],
+                {
+                    product.key: {
+                        "available": True,
+                        "stock": 10,
+                        "title": product.title,
+                        "price": product.price,
+                        "purchase_url": product.purchase_url,
+                        "restock_notified": True,
+                    }
+                },
+            ),
+            [],
+        )
         self.assertEqual(
             find_restocked_products(
                 [product],
@@ -132,7 +134,7 @@ class ParseProductsTests(unittest.TestCase):
                     }
                 },
             ),
-            [],
+            [product],
         )
         self.assertEqual(
             find_restocked_products(
@@ -165,23 +167,6 @@ class ParseProductsTests(unittest.TestCase):
                 },
             ),
             [product],
-        )
-
-        self.assertEqual(
-            find_restocked_products(
-                [product],
-                {
-                    product.key: {
-                        "available": False,
-                        "stock": 0,
-                        "title": product.title,
-                        "price": product.price,
-                        "purchase_url": product.purchase_url,
-                        "restock_notified": True,
-                    }
-                },
-            ),
-            [],
         )
 
 
