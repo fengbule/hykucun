@@ -88,6 +88,45 @@ class NotificationTargetTests(unittest.TestCase):
         self.assertEqual(settings["telegram_message_thread_id"], "8")
         self.assertTrue(meta["is_default"])
 
+    def test_save_monitor_record_inserts_notification_mode(self):
+        with self.connect() as conn:
+            timestamp = app.now_str()
+            monitor_id, message = app.save_monitor_record(
+                conn,
+                None,
+                {
+                    "name": "美国库存监控",
+                    "url": "https://example.com",
+                    "enabled": 1,
+                    "interval_seconds": 60,
+                    "notification_mode": "realtime",
+                    "request_backend": "requests",
+                    "browser_wait_seconds": 8,
+                    "cookie_header": "",
+                    "aff_template": "",
+                    "product_selector": ".product-card",
+                    "title_selector": "h5",
+                    "stock_selector": ".stock-info",
+                    "price_selector": ".pricing-info",
+                    "button_selector": ".buy-now-button",
+                    "link_selector": "a[href]",
+                    "stock_regex": "库存\\s*[:：]?\\s*(\\d+)",
+                    "in_stock_words": "Available",
+                    "out_of_stock_words": "Sold Out",
+                    "title_filter": "",
+                    "notification_target_id": None,
+                },
+                timestamp,
+            )
+            row = conn.execute(
+                "SELECT notification_mode, name, url FROM monitors WHERE id = ?",
+                (monitor_id,),
+            ).fetchone()
+        self.assertEqual(message, "监控项已添加")
+        self.assertEqual(row["notification_mode"], "realtime")
+        self.assertEqual(row["name"], "美国库存监控")
+        self.assertEqual(row["url"], "https://example.com")
+
     def test_delete_notification_target_reassigns_monitors_to_default(self):
         with self.connect() as conn:
             target_id, _ = app.save_notification_target(conn, None, {

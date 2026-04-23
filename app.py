@@ -324,6 +324,60 @@ def save_notification_target(conn: sqlite3.Connection, target_id: int | None, fo
     return int(cursor.lastrowid), "通知通道已添加"
 
 
+def save_monitor_record(
+    conn: sqlite3.Connection,
+    monitor_id: int | None,
+    payload: dict[str, Any],
+    timestamp: str,
+) -> tuple[int, str]:
+    if monitor_id:
+        conn.execute(
+            """
+            UPDATE monitors SET
+                name = ?, url = ?, enabled = ?, interval_seconds = ?,
+                notification_mode = ?, request_backend = ?, browser_wait_seconds = ?, cookie_header = ?,
+                aff_template = ?, product_selector = ?, title_selector = ?, stock_selector = ?,
+                price_selector = ?, button_selector = ?, link_selector = ?, stock_regex = ?,
+                in_stock_words = ?, out_of_stock_words = ?, title_filter = ?,
+                notification_target_id = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                payload["name"], payload["url"], payload["enabled"], payload["interval_seconds"],
+                payload["notification_mode"], payload["request_backend"], payload["browser_wait_seconds"], payload["cookie_header"],
+                payload["aff_template"], payload["product_selector"], payload["title_selector"],
+                payload["stock_selector"], payload["price_selector"], payload["button_selector"],
+                payload["link_selector"], payload["stock_regex"], payload["in_stock_words"],
+                payload["out_of_stock_words"], payload["title_filter"], payload["notification_target_id"],
+                timestamp, monitor_id,
+            ),
+        )
+        return monitor_id, "监控项已更新"
+
+    cursor = conn.execute(
+        """
+        INSERT INTO monitors (
+            name, url, enabled, interval_seconds, notification_mode, request_backend,
+            browser_wait_seconds, cookie_header, aff_template,
+            product_selector, title_selector, stock_selector, price_selector,
+            button_selector, link_selector, stock_regex, in_stock_words,
+            out_of_stock_words, title_filter, notification_target_id,
+            created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            payload["name"], payload["url"], payload["enabled"], payload["interval_seconds"],
+            payload["notification_mode"], payload["request_backend"], payload["browser_wait_seconds"], payload["cookie_header"],
+            payload["aff_template"], payload["product_selector"], payload["title_selector"],
+            payload["stock_selector"], payload["price_selector"], payload["button_selector"],
+            payload["link_selector"], payload["stock_regex"], payload["in_stock_words"],
+            payload["out_of_stock_words"], payload["title_filter"], payload["notification_target_id"],
+            timestamp, timestamp,
+        ),
+    )
+    return int(cursor.lastrowid), "监控项已添加"
+
+
 def delete_notification_target_record(conn: sqlite3.Connection, target_id: int) -> tuple[bool, int]:
     timestamp = now_str()
     reassigned = conn.execute(
@@ -1116,52 +1170,8 @@ def create_app() -> Flask:
                 if not target:
                     flash("选择的通知通道不存在", "error")
                     return redirect(url_for("index", edit=monitor_id) if monitor_id else url_for("index"))
-            if monitor_id:
-                conn.execute(
-                    """
-                    UPDATE monitors SET
-                        name = ?, url = ?, enabled = ?, interval_seconds = ?,
-                        notification_mode = ?, request_backend = ?, browser_wait_seconds = ?, cookie_header = ?,
-                        aff_template = ?, product_selector = ?, title_selector = ?, stock_selector = ?,
-                        price_selector = ?, button_selector = ?, link_selector = ?, stock_regex = ?,
-                        in_stock_words = ?, out_of_stock_words = ?, title_filter = ?,
-                        notification_target_id = ?, updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (
-                        payload["name"], payload["url"], payload["enabled"], payload["interval_seconds"],
-                        payload["notification_mode"], payload["request_backend"], payload["browser_wait_seconds"], payload["cookie_header"],
-                        payload["aff_template"], payload["product_selector"], payload["title_selector"],
-                        payload["stock_selector"], payload["price_selector"], payload["button_selector"],
-                        payload["link_selector"], payload["stock_regex"], payload["in_stock_words"],
-                        payload["out_of_stock_words"], payload["title_filter"], payload["notification_target_id"],
-                        timestamp, monitor_id,
-                    ),
-                )
-                flash("监控项已更新", "success")
-            else:
-                conn.execute(
-                    """
-                    INSERT INTO monitors (
-                        name, url, enabled, interval_seconds, notification_mode, request_backend,
-                        browser_wait_seconds, cookie_header, aff_template,
-                        product_selector, title_selector, stock_selector, price_selector,
-                        button_selector, link_selector, stock_regex, in_stock_words,
-                        out_of_stock_words, title_filter, notification_target_id,
-                        created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        payload["name"], payload["url"], payload["enabled"], payload["interval_seconds"],
-                        payload["notification_mode"], payload["request_backend"], payload["browser_wait_seconds"], payload["cookie_header"],
-                        payload["aff_template"], payload["product_selector"], payload["title_selector"],
-                        payload["stock_selector"], payload["price_selector"], payload["button_selector"],
-                        payload["link_selector"], payload["stock_regex"], payload["in_stock_words"],
-                        payload["out_of_stock_words"], payload["title_filter"], payload["notification_target_id"],
-                        timestamp, timestamp,
-                    ),
-                )
-                flash("监控项已添加", "success")
+            _, message = save_monitor_record(conn, monitor_id, payload, timestamp)
+            flash(message, "success")
         return redirect(url_for("index"))
 
     @app.post("/monitors/<int:monitor_id>/toggle")
