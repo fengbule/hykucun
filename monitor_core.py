@@ -29,6 +29,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "in_stock_words": "立即购买,加入购物车,购买,开通,下单,Order Now,Buy Now,Available,Configure",
     "out_of_stock_words": "产品已售罄,已售罄,售罄,缺货,无货,暂无库存,Out of Stock,Sold Out,Unavailable",
     "aff_template": "",
+    "notification_mode": "restock_only",
 }
 
 REQUEST_HEADERS = {
