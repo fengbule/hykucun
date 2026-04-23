@@ -7,7 +7,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import telegram_products_to_edit, telegram_text_hash, upsert_products
+from app import (
+    NOTIFICATION_MODE_REALTIME,
+    NOTIFICATION_MODE_RESTOCK_ONLY,
+    filter_restocked_products,
+    normalize_notification_mode,
+    telegram_products_to_edit,
+    telegram_text_hash,
+    upsert_products,
+)
 from monitor_core import Product, telegram_product_card
 
 
@@ -183,6 +191,84 @@ class UpsertProductsTests(unittest.TestCase):
 
         self.assertEqual(len(edits), 1)
         self.assertIn("库存：9", edits[0][2])
+
+
+class NotificationModeTests(unittest.TestCase):
+    def test_normalize_notification_mode_defaults_to_restock_only(self) -> None:
+        self.assertEqual(normalize_notification_mode(None), NOTIFICATION_MODE_RESTOCK_ONLY)
+        self.assertEqual(normalize_notification_mode(""), NOTIFICATION_MODE_RESTOCK_ONLY)
+        self.assertEqual(normalize_notification_mode("unknown"), NOTIFICATION_MODE_RESTOCK_ONLY)
+
+    def test_filter_restocked_products_in_restock_only_mode(self) -> None:
+        new_available = Product(
+            key="new-1",
+            title="A",
+            status="in_stock",
+            available=True,
+            stock=5,
+            price="$1",
+            purchase_url="https://a",
+            button="Buy Now",
+        )
+        restocked_again = Product(
+            key="old-1",
+            title="B",
+            status="in_stock",
+            available=True,
+            stock=8,
+            price="$2",
+            purchase_url="https://b",
+            button="Buy Now",
+        )
+        stock_changed_only = Product(
+            key="old-2",
+            title="C",
+            status="in_stock",
+            available=True,
+            stock=9,
+            price="$3",
+            purchase_url="https://c",
+            button="Buy Now",
+        )
+        previous = {
+            "old-1": {"available": False, "stock": 0},
+            "old-2": {"available": True, "stock": 10},
+        }
+
+        filtered = filter_restocked_products(
+            [new_available, restocked_again, stock_changed_only],
+            previous,
+            NOTIFICATION_MODE_RESTOCK_ONLY,
+        )
+
+        self.assertEqual([item.key for item in filtered], ["new-1", "old-1"])
+
+    def test_filter_restocked_products_in_realtime_mode_keeps_all(self) -> None:
+        products = [
+            Product(
+                key="old-1",
+                title="B",
+                status="in_stock",
+                available=True,
+                stock=8,
+                price="$2",
+                purchase_url="https://b",
+                button="Buy Now",
+            ),
+            Product(
+                key="old-2",
+                title="C",
+                status="in_stock",
+                available=True,
+                stock=9,
+                price="$3",
+                purchase_url="https://c",
+                button="Buy Now",
+            ),
+        ]
+
+        filtered = filter_restocked_products(products, {"old-1": {"available": False}}, NOTIFICATION_MODE_REALTIME)
+        self.assertEqual(filtered, products)
 
 
 if __name__ == "__main__":

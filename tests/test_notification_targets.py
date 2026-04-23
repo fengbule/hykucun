@@ -42,6 +42,7 @@ class NotificationTargetTests(unittest.TestCase):
             self.assertIn("notification_targets", tables)
             monitor_cols = {row[1] for row in conn.execute("PRAGMA table_info(monitors)")}
             self.assertIn("notification_target_id", monitor_cols)
+            self.assertIn("notification_mode", monitor_cols)
 
     def test_resolve_monitor_notification_settings_uses_custom_target(self):
         with self.connect() as conn:

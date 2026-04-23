@@ -37,6 +37,8 @@ INSECURE_WEBUI_PASSWORDS = {"change-this-password"}
 MIN_INTERVAL_SECONDS = 1
 DEFAULT_SCHEDULER_TICK_SECONDS = 1.0
 DEFAULT_NOTIFICATION_TARGET_NAME = "默认 Telegram"
+NOTIFICATION_MODE_RESTOCK_ONLY = "restock_only"
+NOTIFICATION_MODE_REALTIME = "realtime"
 
 
 class ClosingConnection(sqlite3.Connection):
@@ -120,6 +122,7 @@ def init_db() -> None:
                 url TEXT NOT NULL,
                 enabled INTEGER NOT NULL DEFAULT 1,
                 interval_seconds INTEGER NOT NULL DEFAULT 60,
+                notification_mode TEXT NOT NULL DEFAULT 'restock_only',
                 request_backend TEXT NOT NULL DEFAULT 'requests',
                 browser_wait_seconds INTEGER NOT NULL DEFAULT 8,
                 cookie_header TEXT NOT NULL DEFAULT '',
@@ -177,6 +180,12 @@ def init_db() -> None:
         ensure_column(conn, "monitors", "cookie_header", "TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "monitors", "title_filter", "TEXT NOT NULL DEFAULT ''")
         ensure_column(conn, "monitors", "notification_target_id", "INTEGER")
+        ensure_column(
+            conn,
+            "monitors",
+            "notification_mode",
+            "TEXT NOT NULL DEFAULT 'restock_only'",
+        )
         ensure_column(conn, "products", "unavailable_since", "TEXT")
         ensure_column(conn, "products", "restock_notified", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(conn, "products", "telegram_chat_id", "TEXT NOT NULL DEFAULT ''")
@@ -195,17 +204,18 @@ def insert_default_monitor(conn: sqlite3.Connection) -> None:
         """
         INSERT INTO monitors (
             name, url, enabled, interval_seconds, aff_template,
-            request_backend, browser_wait_seconds, cookie_header,
+            notification_mode, request_backend, browser_wait_seconds, cookie_header,
             product_selector, title_selector, stock_selector, price_selector,
             button_selector, link_selector, stock_regex, in_stock_words,
             out_of_stock_words, title_filter, notification_target_id,
             created_at, updated_at
-        ) VALUES (?, ?, 1, 60, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', NULL, ?, ?)
+        ) VALUES (?, ?, 1, 60, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', NULL, ?, ?)
         """,
         (
             values["name"],
             values["url"],
             values["aff_template"],
+            values.get("notification_mode", NOTIFICATION_MODE_RESTOCK_ONLY),
             values["request_backend"],
             values["browser_wait_seconds"],
             values.get("cookie_header", ""),
@@ -371,6 +381,7 @@ def monitor_config(row: sqlite3.Row) -> dict[str, Any]:
         "browser_wait_seconds",
         "cookie_header",
         "aff_template",
+        "notification_mode",
         "product_selector",
         "title_selector",
         "stock_selector",
@@ -383,6 +394,28 @@ def monitor_config(row: sqlite3.Row) -> dict[str, Any]:
     ):
         config[key] = row[key]
     return config
+
+
+def normalize_notification_mode(raw_value: str | None) -> str:
+    value = (raw_value or "").strip().lower()
+    if value == NOTIFICATION_MODE_REALTIME:
+        return NOTIFICATION_MODE_REALTIME
+    return NOTIFICATION_MODE_RESTOCK_ONLY
+
+
+def filter_restocked_products(
+    restocked: list[Product],
+    previous_products: dict[str, dict[str, Any]],
+    notification_mode: str,
+) -> list[Product]:
+    if normalize_notification_mode(notification_mode) == NOTIFICATION_MODE_REALTIME:
+        return restocked
+    filtered: list[Product] = []
+    for product in restocked:
+        previous = find_previous_product_state(product, previous_products)
+        if not previous or not bool(previous.get("available")):
+            filtered.append(product)
+    return filtered
 
 
 def title_matches(product: Product, title_filter: str) -> bool:
@@ -725,13 +758,15 @@ def check_monitor_once(monitor_id: int) -> tuple[bool, str]:
             return False, "监控项不存在"
         config = monitor_config(row)
         title_filter = row["title_filter"]
+        notification_mode = normalize_notification_mode(row["notification_mode"])
         previous = previous_product_state(conn, monitor_id)
         settings, target_meta = resolve_monitor_notification_settings(conn, row)
 
     try:
         products = fetch_products(config)
         products = [product for product in products if title_matches(product, title_filter)]
-        restocked = find_restocked_products(products, previous)
+        restocked_candidates = find_restocked_products(products, previous)
+        restocked = filter_restocked_products(restocked_candidates, previous, notification_mode)
         telegram_edits = telegram_products_to_edit(products, previous, restocked, settings, config["name"])
         available_count = sum(1 for product in products if product.available)
         if products:
@@ -767,7 +802,7 @@ def check_monitor_once(monitor_id: int) -> tuple[bool, str]:
         if status in {"no_products", "cookie_required", "cookie_expiring", "cookie_expired"}:
             log_event(conn, monitor_id, "warning", error)
             return False, error
-        message = f"检测 {len(products)} 个商品，可购买 {available_count} 个，补货/库存变动 {len(restocked)} 个"
+        message = f"检测 {len(products)} 个商品，可购买 {available_count} 个，触发推送 {len(restocked)} 个"
         log_event(conn, monitor_id, "info", f"{message}，通知通道：{target_meta['display_label']}")
 
     sent = 0
@@ -1035,6 +1070,7 @@ def create_app() -> Flask:
             "url": request.form.get("url", "").strip(),
             "enabled": 1 if request.form.get("enabled") == "on" else 0,
             "interval_seconds": max(MIN_INTERVAL_SECONDS, request.form.get("interval_seconds", type=int) or 60),
+            "notification_mode": normalize_notification_mode(request.form.get("notification_mode")),
             "request_backend": request.form.get("request_backend", "requests").strip()
             if request.form.get("request_backend") in {"requests", "browser"}
             else "requests",
@@ -1068,7 +1104,7 @@ def create_app() -> Flask:
                     """
                     UPDATE monitors SET
                         name = ?, url = ?, enabled = ?, interval_seconds = ?,
-                        request_backend = ?, browser_wait_seconds = ?, cookie_header = ?,
+                        notification_mode = ?, request_backend = ?, browser_wait_seconds = ?, cookie_header = ?,
                         aff_template = ?, product_selector = ?, title_selector = ?, stock_selector = ?,
                         price_selector = ?, button_selector = ?, link_selector = ?, stock_regex = ?,
                         in_stock_words = ?, out_of_stock_words = ?, title_filter = ?,
@@ -1077,7 +1113,7 @@ def create_app() -> Flask:
                     """,
                     (
                         payload["name"], payload["url"], payload["enabled"], payload["interval_seconds"],
-                        payload["request_backend"], payload["browser_wait_seconds"], payload["cookie_header"],
+                        payload["notification_mode"], payload["request_backend"], payload["browser_wait_seconds"], payload["cookie_header"],
                         payload["aff_template"], payload["product_selector"], payload["title_selector"],
                         payload["stock_selector"], payload["price_selector"], payload["button_selector"],
                         payload["link_selector"], payload["stock_regex"], payload["in_stock_words"],
@@ -1090,7 +1126,7 @@ def create_app() -> Flask:
                 conn.execute(
                     """
                     INSERT INTO monitors (
-                        name, url, enabled, interval_seconds, request_backend,
+                        name, url, enabled, interval_seconds, notification_mode, request_backend,
                         browser_wait_seconds, cookie_header, aff_template,
                         product_selector, title_selector, stock_selector, price_selector,
                         button_selector, link_selector, stock_regex, in_stock_words,
@@ -1100,7 +1136,7 @@ def create_app() -> Flask:
                     """,
                     (
                         payload["name"], payload["url"], payload["enabled"], payload["interval_seconds"],
-                        payload["request_backend"], payload["browser_wait_seconds"], payload["cookie_header"],
+                        payload["notification_mode"], payload["request_backend"], payload["browser_wait_seconds"], payload["cookie_header"],
                         payload["aff_template"], payload["product_selector"], payload["title_selector"],
                         payload["stock_selector"], payload["price_selector"], payload["button_selector"],
                         payload["link_selector"], payload["stock_regex"], payload["in_stock_words"],

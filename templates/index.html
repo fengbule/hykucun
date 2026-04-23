@@ -175,9 +175,20 @@
             <small>支持在 WebUI 里直接填 1 秒及以上。</small>
           </label>
           <label>
+            推送策略
+            {% set mode = form_monitor['notification_mode'] if form_monitor['notification_mode'] is defined else 'restock_only' %}
+            <select name="notification_mode">
+              <option value="restock_only" {% if mode == 'restock_only' %}selected{% endif %}>安静模式（仅补货推送一次）</option>
+              <option value="realtime" {% if mode == 'realtime' %}selected{% endif %}>实时模式（库存每变动都推送）</option>
+            </select>
+          </label>
+          <label>
             标题过滤
             <input name="title_filter" value="{{ edit_monitor.title_filter if edit_monitor else '' }}" placeholder="香港,4H">
           </label>
+        </div>
+
+        <div class="form-row three">
           <label>
             通知目标
             <select name="notification_target_id">
@@ -248,6 +259,7 @@
         <div class="meta">
           <span>间隔 {{ monitor.interval_seconds }} 秒</span>
           <span>模式 {{ monitor.request_backend }}</span>
+          <span>推送 {{ '实时模式' if monitor.notification_mode == 'realtime' else '安静模式' }}</span>
           <span>
             通知
             {% if monitor.notification_target_name and monitor.notification_target_enabled %}
