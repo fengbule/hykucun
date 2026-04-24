@@ -164,8 +164,8 @@
         </div>
 
         <label>
-          监控网页
-          <input name="url" value="{{ form_monitor['url'] }}" required>
+          监控地址 / API URL
+          <input name="url" value="{{ form_monitor['url'] }}" required placeholder="网页地址或 JSON API 地址">
         </label>
 
         <div class="form-row three">
@@ -207,6 +207,7 @@
               {% set backend = form_monitor['request_backend'] if form_monitor['request_backend'] is defined else 'requests' %}
               <option value="requests" {% if backend == 'requests' %}selected{% endif %}>Requests 轻量模式</option>
               <option value="browser" {% if backend == 'browser' %}selected{% endif %}>Browser 浏览器模式</option>
+              <option value="api" {% if backend in ['api', 'api_json', 'json'] %}selected{% endif %}>API JSON 模式</option>
             </select>
           </label>
           <label>
@@ -216,8 +217,9 @@
         </div>
 
         <label>
-          Cookie（可选，防护站点用）
-          <input name="cookie_header" value="{{ form_monitor['cookie_header'] if form_monitor['cookie_header'] is defined else '' }}" placeholder="cf_clearance=...; __cf_bm=...">
+          Cookie / API Header（可选）
+          <input name="cookie_header" value="{{ form_monitor['cookie_header'] if form_monitor['cookie_header'] is defined else '' }}" placeholder="cf_clearance=...; 或 Authorization: Bearer xxx">
+          <small>API JSON 模式支持填 Bearer xxx，或每行一个 Header，例如 Authorization: Bearer xxx。</small>
         </label>
 
         <label>
@@ -226,12 +228,12 @@
         </label>
 
         <div class="selector-grid">
-          <label><span>商品卡片</span><input name="product_selector" value="{{ form_monitor['product_selector'] }}"></label>
-          <label><span>标题</span><input name="title_selector" value="{{ form_monitor['title_selector'] }}"></label>
-          <label><span>库存</span><input name="stock_selector" value="{{ form_monitor['stock_selector'] }}"></label>
-          <label><span>价格</span><input name="price_selector" value="{{ form_monitor['price_selector'] }}"></label>
-          <label><span>按钮</span><input name="button_selector" value="{{ form_monitor['button_selector'] }}"></label>
-          <label><span>链接</span><input name="link_selector" value="{{ form_monitor['link_selector'] }}"></label>
+          <label><span>商品卡片 / API商品路径</span><input name="product_selector" value="{{ form_monitor['product_selector'] }}" placeholder="网页CSS，或 data.items / result.products"></label>
+          <label><span>标题 / API标题路径</span><input name="title_selector" value="{{ form_monitor['title_selector'] }}" placeholder="网页CSS，或 name|title"></label>
+          <label><span>库存 / API库存路径</span><input name="stock_selector" value="{{ form_monitor['stock_selector'] }}" placeholder="网页CSS，或 stock|inventory|qty"></label>
+          <label><span>价格 / API价格路径</span><input name="price_selector" value="{{ form_monitor['price_selector'] }}" placeholder="网页CSS，或 price|amount"></label>
+          <label><span>按钮 / API状态路径</span><input name="button_selector" value="{{ form_monitor['button_selector'] }}" placeholder="网页CSS，或 status|available"></label>
+          <label><span>链接 / API购买路径</span><input name="link_selector" value="{{ form_monitor['link_selector'] }}" placeholder="网页CSS，或 url|buy_url"></label>
         </div>
 
         <div class="form-row three">
