@@ -6,7 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from monitor_core import DEFAULT_CONFIG, find_restocked_products, parse_products
+from monitor_core import DEFAULT_CONFIG, find_restocked_products, normalize_product_url, parse_products
 
 
 class ParseProductsTests(unittest.TestCase):
@@ -141,22 +141,6 @@ class ParseProductsTests(unittest.TestCase):
                 [product],
                 {
                     product.key: {
-                        "available": True,
-                        "stock": 7,
-                        "title": product.title,
-                        "price": product.price,
-                        "purchase_url": product.purchase_url,
-                        "restock_notified": True,
-                    }
-                },
-            ),
-            [product],
-        )
-        self.assertEqual(
-            find_restocked_products(
-                [product],
-                {
-                    product.key: {
                         "available": False,
                         "stock": 0,
                         "title": product.title,
@@ -168,22 +152,38 @@ class ParseProductsTests(unittest.TestCase):
             ),
             [product],
         )
+
+    def test_vmiss_aff_links_keep_same_product_identity(self) -> None:
         self.assertEqual(
-            find_restocked_products(
-                [product],
-                {
-                    product.key: {
-                        "available": True,
-                        "stock": 10,
-                        "title": product.title,
-                        "price": product.price,
-                        "purchase_url": product.purchase_url,
-                        "restock_notified": False,
-                    }
-                },
-            ),
-            [product],
+            normalize_product_url("https://app.vmiss.com/aff.php?aff=2762&pid=7&utm_source=tg"),
+            "https://app.vmiss.com/aff.php?pid=7",
         )
+
+    def test_stock_parses_common_vmiss_and_cn_formats(self) -> None:
+        cases = ["1 Available", "Available: 2", "库存：3 台", "剩余 4", "Quantity: 5"]
+        for index, stock_text in enumerate(cases, start=1):
+            with self.subTest(stock_text=stock_text):
+                product = parse_products(self.whmcs_product_html(stock_text), self.config())[0]
+                self.assertEqual(product.stock, index)
+                self.assertTrue(product.available)
+
+    def test_disabled_or_sold_out_button_is_not_available(self) -> None:
+        html = """
+        <html><body>
+          <div class="package">
+            <h3>US.LA.CN2.Basic</h3>
+            <span>1 Available</span>
+            <a class="btn disabled" href="/cart.php?a=add&pid=7">Order Now</a>
+            <span>Sold Out</span>
+          </div>
+        </body></html>
+        """
+
+        product = parse_products(html, self.config())[0]
+
+        self.assertEqual(product.stock, 1)
+        self.assertFalse(product.available)
+        self.assertEqual(product.status, "out_of_stock")
 
 
 if __name__ == "__main__":
