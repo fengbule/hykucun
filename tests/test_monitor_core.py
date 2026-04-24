@@ -6,7 +6,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from monitor_core import DEFAULT_CONFIG, find_restocked_products, normalize_product_url, parse_products
+from monitor_core import (
+    DEFAULT_CONFIG,
+    api_headers_from_cookie_header,
+    find_restocked_products,
+    normalize_product_url,
+    parse_api_products,
+    parse_products,
+)
 
 
 class ParseProductsTests(unittest.TestCase):
@@ -184,6 +191,75 @@ class ParseProductsTests(unittest.TestCase):
         self.assertEqual(product.stock, 1)
         self.assertFalse(product.available)
         self.assertEqual(product.status, "out_of_stock")
+
+    def test_api_products_parse_default_paths(self) -> None:
+        config = self.config()
+        config.update({"url": "https://akile.ai/api/products", "request_backend": "api"})
+        data = {
+            "data": {
+                "items": [
+                    {"name": "Akile HK Starter", "stock": 0, "price": "10 USD", "buy_url": "/order/1"},
+                    {"name": "Akile JP Basic", "inventory": 3, "amount": "20 USD", "status": "Available", "buy_url": "/order/2"},
+                ]
+            }
+        }
+
+        products = parse_api_products(data, config)
+
+        self.assertEqual(len(products), 2)
+        self.assertEqual(products[0].title, "Akile HK Starter")
+        self.assertEqual(products[0].stock, 0)
+        self.assertFalse(products[0].available)
+        self.assertEqual(products[1].title, "Akile JP Basic")
+        self.assertEqual(products[1].stock, 3)
+        self.assertTrue(products[1].available)
+        self.assertEqual(products[1].purchase_url, "https://akile.ai/order/2")
+
+    def test_api_products_parse_custom_paths(self) -> None:
+        config = self.config()
+        config.update(
+            {
+                "url": "https://akile.ai/api/v1/plans",
+                "request_backend": "api",
+                "product_selector": "result.rows",
+                "title_selector": "product.title",
+                "stock_selector": "meta.left",
+                "price_selector": "billing.monthly",
+                "button_selector": "enabled",
+                "link_selector": "links.checkout",
+            }
+        )
+        data = {
+            "result": {
+                "rows": [
+                    {
+                        "product": {"title": "Akile SG NAT"},
+                        "meta": {"left": 2},
+                        "billing": {"monthly": "$6.00"},
+                        "enabled": True,
+                        "links": {"checkout": "https://akile.ai/order/sg-nat"},
+                    }
+                ]
+            }
+        }
+
+        product = parse_api_products(data, config)[0]
+
+        self.assertEqual(product.title, "Akile SG NAT")
+        self.assertEqual(product.stock, 2)
+        self.assertEqual(product.price, "$6.00")
+        self.assertTrue(product.available)
+        self.assertEqual(product.purchase_url, "https://akile.ai/order/sg-nat")
+
+    def test_api_header_parsing_accepts_bearer_or_header_lines(self) -> None:
+        self.assertEqual(
+            api_headers_from_cookie_header("Bearer token-123"),
+            {"Authorization": "Bearer token-123"},
+        )
+        self.assertEqual(
+            api_headers_from_cookie_header("Authorization: Bearer token-123\nX-Test: yes"),
+            {"Authorization": "Bearer token-123", "X-Test": "yes"},
+        )
 
 
 if __name__ == "__main__":
