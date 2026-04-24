@@ -21,7 +21,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--interval", type=int, default=60)
     parser.add_argument("--state-file", default=".restock_state.json")
     parser.add_argument("--aff-template", default="")
-    parser.add_argument("--request-backend", choices=["requests", "browser"], default="requests")
+    parser.add_argument("--request-backend", choices=["requests", "browser", "api", "api_json", "json"], default="requests")
     parser.add_argument("--browser-wait-seconds", type=int, default=8)
     parser.add_argument("--cookie-header", default="")
     parser.add_argument("--product-selector", default=DEFAULT_CONFIG["product_selector"])
