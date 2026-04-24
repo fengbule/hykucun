@@ -37,12 +37,52 @@ REQUEST_HEADERS = {
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
     "Cache-Control": "no-cache",
     "Pragma": "no-cache",
+    "Upgrade-Insecure-Requests": "1",
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/124.0.0.0 Safari/537.36"
     ),
 }
+
+VOLATILE_QUERY_KEYS = {
+    "aff",
+    "affiliate",
+    "ref",
+    "referer",
+    "promocode",
+    "promo",
+    "coupon",
+    "currency",
+    "language",
+    "carttpl",
+    "gid",
+    "fid",
+    "t",
+    "ts",
+    "time",
+    "timestamp",
+    "nonce",
+    "session",
+    "sid",
+    "token",
+}
+
+DISABLED_CLASS_WORDS = (
+    "disabled",
+    "disable",
+    "soldout",
+    "sold-out",
+    "outofstock",
+    "out-of-stock",
+    "unavailable",
+    "sellout",
+)
+
+PRICE_PATTERNS = (
+    r"([$€£¥]\s*\d[\d,.]*(?:\s*[A-Z]{3})?(?:\s*(?:/\s*)?(?:Monthly|Annually|Quarterly|Yearly|年|月|三年))?)",
+    r"(\d[\d,.]*\s*(?:USD|CAD|EUR|GBP|CNY|RMB|HKD|JPY)(?:\s*(?:/\s*)?(?:Monthly|Annually|Quarterly|Yearly|年|月|三年))?)",
+)
 
 
 @dataclass(frozen=True)
@@ -84,28 +124,42 @@ def selected_text(root: Any, selector: str | None) -> str:
     return clean_text(node.get_text(" ", strip=True)) if node else ""
 
 
+def parse_stock_number(value: str) -> int | None:
+    match = re.search(r"\d[\d,]*", value or "")
+    if not match:
+        return None
+    try:
+        return int(match.group(0).replace(",", ""))
+    except ValueError:
+        return None
+
+
 def extract_stock(stock_text: str, stock_regex: str) -> int | None:
     if not stock_text:
         return None
     patterns = [
         stock_regex,
         DEFAULT_CONFIG["stock_regex"],
-        r"(\d+)\s*Available",
-        r"Available\s*[:：]?\s*(\d+)",
-        r"库存\s*[:：]?\s*(\d+)",
+        r"(\d[\d,]*)\s*(?:Available|Left|In\s*Stock|stock)",
+        r"(?:Available|Qty|Quantity|Stock|库存|剩余|可用)\s*[:：]?\s*(\d[\d,]*)",
+        r"(\d[\d,]*)\s*(?:件|台|个)?\s*(?:库存|剩余|可用)",
+        r"库存\s*[:：]?\s*(\d[\d,]*)",
     ]
     for pattern in patterns:
         if not pattern:
             continue
         try:
-            match = re.search(pattern, stock_text, re.IGNORECASE)
+            matches = list(re.finditer(pattern, stock_text, re.IGNORECASE))
         except re.error:
             continue
-        if not match:
-            continue
-        for group in match.groups():
-            if group and group.isdigit():
-                return int(group)
+        for match in matches:
+            candidates = match.groups() or (match.group(0),)
+            for candidate in candidates:
+                if not candidate:
+                    continue
+                stock = parse_stock_number(candidate)
+                if stock is not None:
+                    return stock
     return None
 
 
@@ -116,14 +170,28 @@ def node_classes(node: Any | None) -> set[str]:
     return {str(item) for item in classes}
 
 
+def node_is_disabled(node: Any | None) -> bool:
+    if node is None:
+        return False
+    if node.has_attr("disabled"):
+        return True
+    if str(node.get("aria-disabled", "")).lower() == "true":
+        return True
+    classes = {item.lower() for item in node_classes(node)}
+    class_text = " ".join(classes)
+    return any(word in class_text for word in DISABLED_CLASS_WORDS)
+
+
 def extract_link(node: Any | None) -> str:
     if node is None:
         return ""
 
-    for attr in ("href", "data-url", "data-href", "data-link"):
+    for attr in ("href", "data-url", "data-href", "data-link", "data-target"):
         value = node.get(attr)
         if value:
-            return str(value).strip()
+            value_text = str(value).strip()
+            if value_text and not value_text.lower().startswith(("javascript:", "#")):
+                return value_text
 
     onclick = node.get("onclick") or ""
     match = re.search(r"""(?:location\.href|window\.location)\s*=\s*['"]([^'"]+)['"]""", onclick)
@@ -164,32 +232,58 @@ def apply_aff_template(url: str, aff_template: str) -> str:
     return f"{template}{url}"
 
 
+def normalize_product_url(url: str) -> str:
+    value = clean_text(url)
+    if not value:
+        return ""
+    split = urlsplit(value)
+    query_pairs: list[tuple[str, str]] = []
+    for key, item_value in parse_qsl(split.query, keep_blank_values=True):
+        lowered_key = key.lower()
+        if lowered_key in VOLATILE_QUERY_KEYS or lowered_key.startswith("utm_"):
+            continue
+        query_pairs.append((key, item_value))
+    normalized_path = re.sub(r"/+$", "", split.path or "/")
+    normalized_query = urlencode(query_pairs, doseq=True)
+    return urlunsplit(
+        (
+            split.scheme.lower(),
+            split.netloc.lower(),
+            normalized_path,
+            normalized_query,
+            "",
+        )
+    )
+
+
 def product_key(title: str, price: str, purchase_url: str, fallback_text: str) -> str:
     title_key = clean_text(title).casefold()
     if title_key in {"未知商品", "unknown product"}:
         title_key = ""
-    link_key = clean_text(purchase_url)
+    link_key = normalize_product_url(purchase_url)
     if title_key or link_key:
-        raw = "|".join(["product-v2", title_key, link_key])
+        raw = "|".join(["product-v3", title_key, link_key])
     else:
-        raw = "|".join(["product-v2", clean_text(price).casefold(), clean_text(fallback_text)[:120]])
+        raw = "|".join(["product-v3", clean_text(price).casefold(), clean_text(fallback_text)[:120]])
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
 
 def parse_product_card(card: Any, config: dict[str, Any]) -> Product:
     title = selected_text(card, config.get("title_selector")) or "未知商品"
-    stock_text = selected_text(card, config.get("stock_selector"))
-    price = selected_text(card, config.get("price_selector"))
+    card_text = clean_text(card.get_text(" ", strip=True))
+    stock_text = selected_text(card, config.get("stock_selector")) or card_text
+    price = selected_text(card, config.get("price_selector")) or extract_price_from_text(card_text)
     button_node = first_selected(card, config.get("button_selector"))
     button_text = clean_text(button_node.get_text(" ", strip=True)) if button_node else ""
     stock = extract_stock(stock_text, config.get("stock_regex") or DEFAULT_CONFIG["stock_regex"])
 
     out_words = split_words(config.get("out_of_stock_words") or DEFAULT_CONFIG["out_of_stock_words"])
     in_words = split_words(config.get("in_stock_words") or DEFAULT_CONFIG["in_stock_words"])
-    button_says_sold_out = "SellOut" in node_classes(button_node) or contains_any(
-        button_text, out_words
+    status_text = " ".join([card_text, button_text])
+    button_says_sold_out = node_is_disabled(button_node) or contains_any(status_text, out_words)
+    button_says_buyable = contains_any(button_text, in_words) or (
+        not button_text and contains_any(card_text, in_words)
     )
-    button_says_buyable = contains_any(button_text, in_words)
 
     if stock is not None:
         available = stock > 0 and not button_says_sold_out
@@ -209,10 +303,9 @@ def parse_product_card(card: Any, config: dict[str, Any]) -> Product:
     raw_link = extract_link(link_node) or extract_link(button_node)
     absolute_link = urljoin(config["url"], raw_link) if raw_link else config["url"]
     purchase_url = apply_aff_template(absolute_link, config.get("aff_template", ""))
-    fallback_text = clean_text(card.get_text(" ", strip=True))
 
     return Product(
-        key=product_key(title, price, absolute_link, fallback_text),
+        key=product_key(title, price, absolute_link, card_text),
         title=title,
         status=status,
         available=available,
@@ -285,7 +378,13 @@ def looks_like_product_heading(title: str) -> bool:
         "cloud",
         "bgp",
         "cn2",
+        "cmin2",
         "iepl",
+        "starter",
+        "basic",
+        "core",
+        "premium",
+        "lite",
         "三网",
         "优化",
         "线路",
@@ -303,9 +402,9 @@ def whmcs_product_container(heading: Any) -> Any:
     for parent in heading.parents:
         if parent.name not in {"div", "li", "article", "section"}:
             continue
-        if len(parent.find_all(["h3", "h4"])) > 1:
+        if len(parent.find_all(["h2", "h3", "h4", "h5", "h6"])) > 1:
             continue
-        if parent.find("a"):
+        if parent.find(["a", "button"]):
             return parent
     return whmcs_section_fragment(heading)
 
@@ -326,10 +425,11 @@ def parse_whmcs_product_section(title: str, container: Any, config: dict[str, An
 
     in_words = split_words(config.get("in_stock_words") or DEFAULT_CONFIG["in_stock_words"])
     out_words = split_words(config.get("out_of_stock_words") or DEFAULT_CONFIG["out_of_stock_words"])
-    button_node = find_link_by_words(container, in_words) or container.find("a", href=True)
+    button_node = find_link_by_words(container, in_words) or find_purchase_node(container) or container.find("a", href=True)
     button_text = clean_text(button_node.get_text(" ", strip=True)) if button_node else ""
-    button_says_sold_out = contains_any(card_text, out_words) or contains_any(button_text, out_words)
-    button_says_buyable = contains_any(button_text, in_words)
+    status_text = " ".join([card_text, button_text])
+    button_says_sold_out = node_is_disabled(button_node) or contains_any(status_text, out_words)
+    button_says_buyable = contains_any(button_text, in_words) or contains_any(card_text, in_words)
 
     if stock is not None:
         available = stock > 0 and not button_says_sold_out
@@ -362,19 +462,31 @@ def parse_whmcs_product_section(title: str, container: Any, config: dict[str, An
 
 
 def find_link_by_words(container: Any, words: list[str]) -> Any | None:
-    for link in container.find_all("a", href=True):
+    for link in container.find_all(["a", "button"]):
+        if node_is_disabled(link):
+            continue
         if contains_any(clean_text(link.get_text(" ", strip=True)), words):
             return link
     return None
 
 
+def find_purchase_node(container: Any) -> Any | None:
+    for node in container.find_all(["a", "button"]):
+        link = extract_link(node)
+        if not link or node_is_disabled(node):
+            continue
+        lowered = link.lower()
+        if any(token in lowered for token in ("cart", "add", "pid=", "configure", "order", "buy", "store")):
+            return node
+    return None
+
+
 def extract_price_from_text(text: str) -> str:
-    match = re.search(
-        r"([$€£¥]\s*\d[\d,.]*(?:\s*[A-Z]{3})?(?:\s*(?:Monthly|Annually|Quarterly|Yearly|年|月|三年))?)",
-        text,
-        re.IGNORECASE,
-    )
-    return clean_text(match.group(1)) if match else ""
+    for pattern in PRICE_PATTERNS:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return clean_text(match.group(1))
+    return ""
 
 
 def dedupe_products(products: list[Product]) -> list[Product]:
@@ -400,6 +512,7 @@ def detect_blocked_page(html_text: str) -> None:
         "attention required! | cloudflare",
         "security check",
         "ddos-guard",
+        "cf-browser-verification",
     )
     blocked_markers_zh = (
         "正在进行安全验证",
@@ -435,8 +548,37 @@ def fetch_html_with_requests(config: dict[str, Any], timeout: int) -> str:
             "Cloudflare challenge returned 403. Switch this monitor to Browser mode, "
             "or provide a valid Cookie header (for example cf_clearance)."
         )
+    if response.status_code in {403, 429, 503}:
+        detect_blocked_page(response.text)
     response.raise_for_status()
     return response.text
+
+
+def cookie_header_to_playwright_cookies(cookie_header: str, url: str) -> list[dict[str, Any]]:
+    header = clean_text(cookie_header)
+    if not header:
+        return []
+    split = urlsplit(url)
+    cookies: list[dict[str, Any]] = []
+    for part in header.split(";"):
+        if "=" not in part:
+            continue
+        name, value = part.split("=", 1)
+        name = name.strip()
+        if not name:
+            continue
+        cookies.append(
+            {
+                "name": name,
+                "value": value.strip(),
+                "domain": split.hostname or "",
+                "path": "/",
+                "secure": split.scheme == "https",
+                "httpOnly": False,
+                "sameSite": "Lax",
+            }
+        )
+    return cookies
 
 
 def fetch_html_with_browser(config: dict[str, Any], timeout: int) -> str:
@@ -454,11 +596,21 @@ def fetch_html_with_browser(config: dict[str, Any], timeout: int) -> str:
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
-            args=["--no-sandbox"],
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
         )
         cookie_header = clean_text(str(config.get("cookie_header") or ""))
-        extra_headers = {"Cookie": cookie_header} if cookie_header else None
-        context = browser.new_context(extra_http_headers=extra_headers)
+        extra_headers = {key: value for key, value in REQUEST_HEADERS.items() if key != "User-Agent"}
+        context = browser.new_context(
+            user_agent=REQUEST_HEADERS["User-Agent"],
+            locale="zh-CN",
+            timezone_id="Asia/Shanghai",
+            viewport={"width": 1365, "height": 768},
+            ignore_https_errors=True,
+            extra_http_headers=extra_headers,
+        )
+        cookies = cookie_header_to_playwright_cookies(cookie_header, config["url"])
+        if cookies:
+            context.add_cookies(cookies)
         page = context.new_page()
         try:
             try:
@@ -524,11 +676,11 @@ def find_previous_product_state(
 
     product_title = clean_text(product.title).casefold()
     product_price = clean_text(product.price).casefold()
-    product_url = clean_text(product.purchase_url)
+    product_url = normalize_product_url(product.purchase_url)
     for item in previous_products.values():
         previous_title = clean_text(str(item.get("title") or "")).casefold()
         previous_price = clean_text(str(item.get("price") or "")).casefold()
-        previous_url = clean_text(str(item.get("purchase_url") or ""))
+        previous_url = normalize_product_url(str(item.get("purchase_url") or ""))
         if product_url and previous_url and product_url == previous_url:
             return item
         if product_title and previous_title == product_title:
